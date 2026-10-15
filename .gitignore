@@ -1,0 +1,8 @@
+__pycache__/
+config.json
+*.iso
+winsmith-*/
+build/
+dist/
+*.egg-info/
+nuitka-crash-report.xml
