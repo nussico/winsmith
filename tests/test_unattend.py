@@ -1,0 +1,175 @@
+import sys
+import unittest
+import xml.etree.ElementTree as ET
+
+from winsmith.patches import PATCHES, PRESETS, REMOVE_APPS
+from winsmith.unattend import account_error, auto_install_error, encode_password, is_protected, make_patch_script, make_unattend, region_error
+
+NS = {"u": "urn:schemas-microsoft-com:unattend"}
+
+
+class UnattendTests(unittest.TestCase):
+    def test_xml_parses_and_has_everything(self):
+        cfg = {"user": "Pablo & Co", "password": "secret", "computer": "PC1", "edition": "Pro"}
+        xml = make_unattend(cfg, PRESETS["Recommended"])
+        root = ET.fromstring(xml.encode())
+        passes = [s.get("pass") for s in root.findall("u:settings", NS)]
+        self.assertEqual(passes, ["windowsPE", "specialize", "oobeSystem"])
+        self.assertIn("BypassTPMCheck", xml)
+        self.assertIn("winsmith.ps1", xml)
+        self.assertIn("Pablo &amp; Co", xml)
+        self.assertIn(encode_password("secret"), xml)
+        self.assertNotIn("secret<", xml)
+        self.assertIn("VK7JG-NPHTM-C97JM-9MPGT-3V66T", xml)
+
+    def test_no_user_no_patches(self):
+        xml = make_unattend({}, [])
+        ET.fromstring(xml.encode())
+        self.assertNotIn("<LocalAccount ", xml)
+        self.assertNotIn("HideLocalAccountScreen", xml)
+        self.assertNotIn("winsmith.ps1", xml)
+        self.assertNotIn("LabConfig", xml)
+
+    def test_password_encoding(self):
+        # Same as the old PowerShell ConvertTo-UnattendPassword: base64(UTF-16LE(pw + "Password")).
+        self.assertEqual(encode_password("a"), "YQBQAGEAcwBzAHcAbwByAGQA")
+
+    def test_patch_script(self):
+        s = make_patch_script(list(PATCHES))
+        self.assertIn(r"Reg add 'HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection' /v 'AllowTelemetry' /t REG_DWORD /d 0x0 /f", s)
+        self.assertIn(r"Reg add 'HKU\WS_DEFAULT\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' /v 'HideFileExt'", s)
+        self.assertIn("/ve /f", s)
+        self.assertIn("/t REG_SZ /d '506'", s)
+        self.assertIn("Reg delete", s)
+        self.assertTrue(s.isascii())
+        self.assertEqual(s.count("{"), s.count("}"))
+
+    def test_user_entries_reapplied_at_first_logon(self):
+        # Windows overwrites theme/search box/CDM in the new profile, and HKCU\Software\Classes is not in NTUSER.DAT.
+        s = make_patch_script(["darkmode", "classicmenu", "tracking"])
+        self.assertIn(r"Reg add 'HKU\WS_DEFAULT\Software\Microsoft\Windows\CurrentVersion\RunOnce' /v 'Winsmith'", s)
+        user = s[s.index("@'"):s.index("'@")]
+        self.assertIn(r"Reg add 'HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' /v 'AppsUseLightTheme'", user)
+        self.assertIn(r"Reg add 'HKCU\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' /ve /f", user)
+        self.assertNotIn("HKLM", user)
+        self.assertNotIn("RunOnce", make_patch_script(["nofaststart"]))  # no user entries, no logon script
+
+    def test_protected_apps_never_removed(self):
+        self.assertTrue(is_protected("Microsoft.VCLibs.140.00"))
+        self.assertFalse(any(is_protected(a) for a in REMOVE_APPS))
+        s = make_patch_script(["bloatapps"])
+        self.assertNotIn("WindowsStore", s)
+
+    def test_presets_known_ids(self):
+        for ids in PRESETS.values():
+            self.assertTrue(set(ids) <= set(PATCHES))
+
+    def test_account_names(self):
+        self.assertIsNone(account_error("pablo", "PC-1"))
+        self.assertIsNotNone(account_error("Administrator"))
+        self.assertIsNotNone(account_error("a/b"))
+        self.assertIsNotNone(account_error("pablo", "pablo"))
+        self.assertIsNotNone(account_error("pablo", "1234"))
+        # A standard user with the setup screens skipped would leave the PC without an admin.
+        self.assertIsNotNone(account_error("pablo", admin=False, skip_oobe=True))
+        self.assertIsNone(account_error("pablo", admin=False, skip_oobe=False))
+
+    def test_values_are_stripped(self):
+        xml = make_unattend({"user": " pablo ", "computer": "   "}, [])
+        self.assertIn("<ComputerName>*</ComputerName>", xml)
+        self.assertIn("<Name>pablo</Name>", xml)
+        self.assertIn("<ComputerName>PC1</ComputerName>", make_unattend({"computer": " PC1 "}, []))
+
+    def test_unattended_off_keeps_only_patches(self):
+        xml = make_unattend({"unattended": False, "user": "bob", "edition": "Pro", "computer": "PC1"}, ["hwchecks"])
+        ET.fromstring(xml.encode())
+        self.assertIn("LabConfig", xml)
+        self.assertIn("winsmith.ps1", xml)
+        for tag in ("LocalAccount", "ProductKey", "UILanguage", "TimeZone", "ComputerName", "AcceptEula"):
+            self.assertNotIn(tag, xml)
+
+    def test_region(self):
+        self.assertIsNone(region_error("en-US", "de-DE"))
+        self.assertIsNone(region_error("de-DE", "0407:00000407"))
+        self.assertIsNotNone(region_error("", "en-US"))
+        self.assertIsNotNone(region_error("german", "en-US"))
+        self.assertIsNotNone(region_error("en-US", ""))
+
+    def test_auto_install_modes(self):
+        off = make_unattend({"edition": "Pro"}, ["hwchecks"])
+        self.assertNotIn("WillWipeDisk", off)
+        self.assertNotIn("autoinstall.js", off)
+
+        disk0 = make_unattend({"auto_install": "disk0"}, [])
+        ET.fromstring(disk0.encode())
+        self.assertIn("<DiskID>0</DiskID><WillWipeDisk>true</WillWipeDisk>", disk0)
+        self.assertIn("<InstallTo><DiskID>0</DiskID><PartitionID>3</PartitionID></InstallTo>", disk0)
+
+        ssd = make_unattend({"auto_install": "best_ssd", "edition": "Pro"}, ["hwchecks"])
+        ET.fromstring(ssd.encode())
+        self.assertIn(r'cscript //nologo %d:\sources\autoinstall.js "Windows 11 Pro"', ssd)
+        self.assertNotIn("WillWipeDisk", ssd)
+        self.assertLess(ssd.index("LabConfig"), ssd.index("autoinstall.js"))  # hardware bypass first
+
+        for mode in ("disk0", "best_ssd"):  # setup answers off: never wipe
+            xml = make_unattend({"unattended": False, "auto_install": mode, "edition": "Pro"}, [])
+            self.assertNotIn("WillWipeDisk", xml)
+            self.assertNotIn("autoinstall.js", xml)
+
+    def test_auto_install_error(self):
+        self.assertIsNotNone(auto_install_error({"auto_install": "best_ssd", "edition": ""}))
+        self.assertIsNone(auto_install_error({"auto_install": "best_ssd", "edition": "Pro"}))
+        self.assertIsNone(auto_install_error({"auto_install": "disk0", "edition": ""}))
+        self.assertIsNone(auto_install_error({"auto_install": "best_ssd", "edition": "", "unattended": False}))
+
+    @unittest.skipUnless(sys.platform == "win32", "needs cscript")
+    def test_wipe_preview_reads_disks(self):
+        from winsmith.iso import wipe_preview
+        text = wipe_preview("best_ssd")
+        self.assertRegex(text, r"Disk \d+: .+ GB, ")
+
+    @unittest.skipUnless(sys.platform == "win32", "needs cscript")
+    def test_autoinstall_picks_disk(self):
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        from winsmith.iso import AUTO_JS
+        # toDisk(index, model, interface, pnp id, media type, size) like Win32_DiskDrive returns them.
+        cases = r"""
+        var G = 1073741824, fixed = 'Fixed hard disk media';
+        var nvme = toDisk(0, 'Samsung 990 PRO', 'SCSI', 'SCSI\\DISK&VEN_NVME&PROD_SAMSUNG\\1', fixed, 500 * G);
+        var nvme2 = toDisk(5, 'WD Black', 'SCSI', 'SCSI\\DISK&VEN_NVME&PROD_WD\\1', fixed, 1000 * G);
+        var ssd = toDisk(1, 'Crucial MX500 SSD', 'IDE', 'SCSI\\DISK&VEN_ATA\\1', fixed, 1000 * G);
+        var hdd = toDisk(2, 'WDC WD10EZEX', 'IDE', 'SCSI\\DISK&VEN_ATA\\2', fixed, 1000 * G);
+        var usb = toDisk(3, 'Samsung T7 NVMe', 'USB', 'USBSTOR\\DISK&VEN_SAMSUNG\\1', 'Removable Media', 500 * G);
+        var tiny = toDisk(4, 'NVMe tiny', 'SCSI', 'SCSI\\DISK&VEN_NVME\\2', fixed, 32 * G);
+        function show(d) { WScript.Echo(d ? describe(d) : 'none'); }
+        show(pickDisk([hdd, ssd, nvme], []));
+        show(pickDisk([hdd, ssd], []));
+        show(pickDisk([nvme, nvme2], []));
+        show(pickDisk([usb, hdd], []));
+        show(pickDisk([tiny, hdd], []));
+        show(pickDisk([nvme, ssd], [0]));
+        show(pickDisk([usb, tiny], []));
+        """
+        fd, f = tempfile.mkstemp(suffix=".js")
+        try:
+            with open(fd, "w", encoding="ascii") as fh:
+                fh.write("var TESTING = true;\r\n" + AUTO_JS.read_text(encoding="utf-8") + cases)
+            out = subprocess.run(["cscript", "//nologo", "//E:jscript", f], capture_output=True, text=True,
+                                 timeout=60).stdout.splitlines()
+        finally:
+            Path(f).unlink(missing_ok=True)
+        self.assertEqual(out, [
+            "Disk 0: Samsung 990 PRO, 500 GB, NVMe",
+            "Disk 1: Crucial MX500 SSD, 1000 GB, SSD",
+            "none",  # a tie opens normal setup
+            "Disk 2: WDC WD10EZEX, 1000 GB, HDD/other",  # USB is never picked
+            "Disk 2: WDC WD10EZEX, 1000 GB, HDD/other",  # under 64 GB is never picked
+            "Disk 1: Crucial MX500 SSD, 1000 GB, SSD",  # the install media disk is skipped
+            "none",
+        ])
+
+
+if __name__ == "__main__":
+    unittest.main()

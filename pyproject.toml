@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "winsmith"
+dynamic = ["version"]
+description = "Build your own Windows 11 ISO on Windows or Linux: patches and unattended setup."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["PySide6-Essentials>=6.5"]
+
+[project.gui-scripts]
+winsmith = "winsmith.__main__:run"
+
+[tool.setuptools]
+packages = ["winsmith", "winsmith.ui", "winsmith.ui.pages"]
+
+[tool.setuptools.package-data]
+winsmith = ["autoinstall.js"]
+
+[tool.setuptools.dynamic]
+version = { attr = "winsmith.__version__" }
