@@ -24,13 +24,14 @@ class BuildSignals(QObject):
     log = Signal(str)
     step = Signal(int, int, str)
     done = Signal(object)
+    installed = Signal(object)
 
 
 class BuildPage(Page):
     def __init__(self, win):
-        super().__init__("Build your ISO", "Takes a few minutes. No admin rights needed.")
+        super().__init__("Build your ISO", "Takes a few minutes. Building needs no admin rights.")
         self.win = win
-        self.building = False
+        self.building = self.installing = False
         self.out = self.cancel = self.job = None
         self.log_open = False
         self.floor = self.target = 0.0
@@ -38,6 +39,7 @@ class BuildPage(Page):
         self.sig.log.connect(lambda m: self._log(m))
         self.sig.step.connect(self._on_step)
         self.sig.done.connect(self._finish)
+        self.sig.installed.connect(self._installed)
         self.ticker = QTimer(self)
         self.ticker.setInterval(33)
         self.ticker.timeout.connect(self._tick)
@@ -149,11 +151,37 @@ class BuildPage(Page):
                 row.addWidget(button("Copy", lambda _=False, c=first: QApplication.clipboard().setText(c)), 0,
                               Qt.AlignTop)
                 lay.addLayout(row)
+                if tool == "oscdimg" and iso.can_install_oscdimg():
+                    inst = button("Installing… confirm the Windows prompt" if self.installing else "Install it for me",
+                                  self._install_tool, "primary")
+                    inst.setEnabled(not self.installing)
+                    lay.addWidget(inst, 0, Qt.AlignLeft)
             lay.addWidget(button("Check again", self.refresh, "link"), 0, Qt.AlignLeft)
             self.tools.body.addWidget(self.tools_body)
         self.tools.setVisible(bool(missing))
         if not self.building:
             self.build_btn.setEnabled(not missing)
+
+    def _install_tool(self):
+        self.installing = True
+        self._refresh_tools()
+        self._set_status("Installing oscdimg…", "Windows asks for admin rights for the ADK installer. Takes a few minutes.")
+        threading.Thread(target=self._install_thread, daemon=True).start()
+
+    def _install_thread(self):
+        try:
+            iso.install_oscdimg(self.sig.log.emit)
+            self.sig.installed.emit(None)
+        except Exception as e:  # show any failure in the UI instead of crashing it
+            self.sig.installed.emit(str(e))
+
+    def _installed(self, err):
+        self.installing = False
+        self.refresh()
+        if err:
+            self._set_status("oscdimg not installed", err, "danger")
+        else:
+            self._set_status("oscdimg installed", "Ready to build.", "success")
 
     def _browse(self):
         p, _ = QFileDialog.getSaveFileName(self, "Save ISO as", self.win.s["output"], "ISO image (*.iso)")
