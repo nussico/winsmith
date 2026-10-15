@@ -181,6 +181,29 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.w.s["user"], "Eve")
         self.assertEqual(self.w.selected(), [])
 
+    def test_install_oscdimg_button(self):
+        import time
+        from winsmith import iso
+        from winsmith.ui.widgets import QPushButton
+        page = self.w.pages["Build"]
+        missing = [("oscdimg", "winget install Microsoft.WindowsADK")]
+        with mock.patch.object(iso, "missing_tools", side_effect=lambda: missing), \
+                mock.patch.object(iso, "can_install_oscdimg", return_value=True), \
+                mock.patch.object(iso, "install_oscdimg", side_effect=lambda log: missing.clear()) as inst:
+            page.refresh()
+            self.assertFalse(page.build_btn.isEnabled())
+            btn = next(b for b in page.tools.findChildren(QPushButton) if b.text() == "Install it for me")
+            btn.click()
+            for _ in range(100):  # the install runs in a thread
+                self.app.processEvents()
+                if not page.installing:
+                    break
+                time.sleep(0.02)
+            inst.assert_called_once()
+            self.assertTrue(page.tools.isHidden())
+            self.assertTrue(page.build_btn.isEnabled())
+            self.assertEqual(page.status.text(), "oscdimg installed")
+
     def test_import_old_profile_maps_ids(self):
         path = Path(self.tmp.name) / "old.json"
         path.write_text(json.dumps({"name": "Old", "patches": ["telemetry", "adscopilot", "notaskview"]}),

@@ -41,7 +41,8 @@ Writing the ISO also needs:
 | Windows | `oscdimg` from the Windows ADK: `winget install Microsoft.WindowsADK` (Deployment Tools) |
 | Linux | `7z` (`apt install 7zip`) and `xorriso` (`apt install xorriso`) |
 
-Winsmith shows what is missing on the Build page.
+Winsmith shows what is missing on the Build page. On Windows, **Install it for me** runs the winget command
+with only the Deployment Tools feature (Windows asks for admin rights).
 
 ## What it does
 

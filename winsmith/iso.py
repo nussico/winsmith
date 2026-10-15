@@ -40,6 +40,27 @@ def _find_7z():
     return found
 
 
+# Only the Deployment Tools feature (oscdimg), not the whole ADK. The ADK installer asks for admin rights itself.
+ADK_INSTALL = ["winget", "install", "-e", "--id", "Microsoft.WindowsADK", "--accept-source-agreements",
+               "--accept-package-agreements", "--override", "/quiet /norestart /features OptionId.DeploymentTools"]
+
+
+def can_install_oscdimg():
+    return IS_WINDOWS and shutil.which("winget") is not None
+
+
+def install_oscdimg(log, cancel=None):
+    """Installs oscdimg with winget. Raises with a readable message if it is still missing afterwards."""
+    try:
+        _run(ADK_INSTALL, log, cancel)
+    except RuntimeError as e:  # winget also exits non-zero for "already installed"; the check below decides
+        log(str(e))
+    if not _find_oscdimg():
+        raise RuntimeError("oscdimg is still missing. If the Windows ADK is already installed, add the "
+                           "'Deployment Tools' feature in Settings > Apps > Windows Assessment and Deployment Kit > Modify.")
+    log("oscdimg installed.")
+
+
 def missing_tools():
     """List of (tool, install hint) that are missing on this OS."""
     if IS_WINDOWS:
