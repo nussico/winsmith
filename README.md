@@ -38,11 +38,12 @@ Writing the ISO also needs:
 
 | OS | Tools |
 |---|---|
-| Windows | `oscdimg` from the Windows ADK: `winget install Microsoft.WindowsADK` (Deployment Tools) |
+| Windows | `oscdimg` from the Windows ADK, Deployment Tools feature only: `winget install -e --id Microsoft.WindowsADK --override "/quiet /norestart /features OptionId.DeploymentTools"` |
 | Linux | `7z` (`apt install 7zip`) and `xorriso` (`apt install xorriso`) |
 
 Winsmith shows what is missing on the Build page. On Windows, **Install it for me** runs the winget command
-with only the Deployment Tools feature (Windows asks for admin rights).
+with only the Deployment Tools feature (Windows asks for admin rights). The install gives up after 20 minutes
+and shows the error if it fails. oscdimg is also found in x86 and ARM64 ADK installs.
 
 ## What it does
 
@@ -93,7 +94,8 @@ python main.py
 Needs Python 3.9+. The GUI uses Qt (PySide6); on some minimal Linux setups Qt also needs `libxcb-cursor0`.
 Settings are kept in `%APPDATA%\Winsmith\config.json` (Linux: `~/.config/Winsmith/config.json`); the password is never saved.
 
-Build the exe: `python build_exe.py` (Nuitka, writes `dist/Winsmith.exe`).
+Build the exe: `python build_exe.py` (Nuitka, writes `dist/Winsmith.exe`). Use Nuitka 4.4 or newer: 4.3 (the latest
+on PyPI) builds an exe that crashes on start with Python 3.14 and PySide6, so build in a venv with a 4.4 release candidate.
 
 ## Tests
 
