@@ -163,6 +163,8 @@ class BuildPage(Page):
             self.build_btn.setEnabled(not missing)
 
     def _install_tool(self):
+        if self.installing or self.building:
+            return
         self.installing = True
         self._refresh_tools()
         self._set_status("Installing oscdimg…", "Windows asks for admin rights for the ADK installer. Takes a few minutes.")
@@ -178,8 +180,12 @@ class BuildPage(Page):
     def _installed(self, err):
         self.installing = False
         self.refresh()
+        if self.building:
+            return
         if err:
             self._set_status("oscdimg not installed", err, "danger")
+        elif iso.missing_tools():
+            self._set_status("oscdimg not found", "The install finished but oscdimg is still missing.", "danger")
         else:
             self._set_status("oscdimg installed", "Ready to build.", "success")
 
@@ -301,7 +307,7 @@ class BuildPage(Page):
         self.building = False
         self.ticker.stop()
         self.pbar.shimmer(False)
-        self.build_btn.setEnabled(True)
+        self.build_btn.setEnabled(not iso.missing_tools())
         self.build_btn.setText("Build ISO")
         if err:
             self._log(f"ERROR: {err}", "danger")

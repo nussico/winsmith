@@ -46,6 +46,28 @@ class IsoTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Deployment Tools"):
                 iso.install_oscdimg(lambda m: None)
 
+    def test_install_oscdimg_includes_winget_error(self):
+        with mock.patch.object(iso, "_run", side_effect=RuntimeError("user declined UAC")), \
+                mock.patch.object(iso, "_find_oscdimg", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "user declined UAC"):
+                iso.install_oscdimg(lambda m: None)
+
+    def test_run_times_out(self):
+        import subprocess
+        import sys
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            with mock.patch.object(iso.time, "monotonic", side_effect=[0, 1000]):
+                iso._run([sys.executable, "-c", "import time; time.sleep(30)"], lambda m: None, timeout=60)
+
+    def test_find_oscdimg_checks_arm64_and_program_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = Path(d) / r"Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\arm64\Oscdimg\oscdimg.exe"
+            exe.parent.mkdir(parents=True)
+            exe.write_text("")
+            env = {"ProgramFiles(x86)": str(Path(d) / "none"), "ProgramFiles": d, "PROCESSOR_ARCHITECTURE": "ARM64"}
+            with mock.patch.object(iso.shutil, "which", return_value=None), mock.patch.dict(os.environ, env):
+                self.assertEqual(iso._find_oscdimg(), str(exe))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -182,27 +182,41 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.w.selected(), [])
 
     def test_install_oscdimg_button(self):
-        import time
         from winsmith import iso
         from winsmith.ui.widgets import QPushButton
         page = self.w.pages["Build"]
         missing = [("oscdimg", "winget install Microsoft.WindowsADK")]
         with mock.patch.object(iso, "missing_tools", side_effect=lambda: missing), \
                 mock.patch.object(iso, "can_install_oscdimg", return_value=True), \
-                mock.patch.object(iso, "install_oscdimg", side_effect=lambda log: missing.clear()) as inst:
+                mock.patch.object(iso, "install_oscdimg", side_effect=lambda log: missing.clear()) as inst, \
+                mock.patch("threading.Thread", lambda target, daemon=None: mock.Mock(start=target)):  # run inline
             page.refresh()
             self.assertFalse(page.build_btn.isEnabled())
             btn = next(b for b in page.tools.findChildren(QPushButton) if b.text() == "Install it for me")
             btn.click()
-            for _ in range(100):  # the install runs in a thread
-                self.app.processEvents()
-                if not page.installing:
-                    break
-                time.sleep(0.02)
+            self.app.processEvents()
+            self.assertFalse(page.installing)
             inst.assert_called_once()
             self.assertTrue(page.tools.isHidden())
             self.assertTrue(page.build_btn.isEnabled())
             self.assertEqual(page.status.text(), "oscdimg installed")
+
+    def test_install_failure_keeps_build_disabled(self):
+        from winsmith import iso
+        page = self.w.pages["Build"]
+        missing = [("oscdimg", "winget install Microsoft.WindowsADK")]
+        with mock.patch.object(iso, "missing_tools", side_effect=lambda: missing), \
+                mock.patch.object(iso, "can_install_oscdimg", return_value=True):
+            page.installing = True
+            page._installed("oscdimg is still missing.\nThe installer reported: declined")
+            self.assertFalse(page.installing)
+            self.assertFalse(page.build_btn.isEnabled())
+            self.assertFalse(page.tools.isHidden())
+            page._installed(None)  # reported success but the tool is still missing
+            self.assertFalse(page.build_btn.isEnabled())
+            page.building = True
+            page._finish("boom")
+            self.assertFalse(page.build_btn.isEnabled())
 
     def test_import_old_profile_maps_ids(self):
         path = Path(self.tmp.name) / "old.json"

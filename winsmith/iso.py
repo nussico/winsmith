@@ -9,6 +9,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from .unattend import AUTO_SCRIPT, SCRIPT_NAME, auto_mode, make_patch_script, make_unattend, ps_quote
@@ -27,9 +28,14 @@ def _find_oscdimg():
     found = shutil.which("oscdimg")
     if found:
         return found
-    base = Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
-    p = base / r"Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe"
-    return str(p) if p.exists() else None
+    arch = {"ARM64": "arm64", "AMD64": "amd64"}.get(os.environ.get("PROCESSOR_ARCHITECTURE", "").upper(), "amd64")
+    for var, default in (("ProgramFiles(x86)", r"C:\Program Files (x86)"), ("ProgramFiles", r"C:\Program Files")):
+        tools = Path(os.environ.get(var, default)) / r"Windows Kits\10\Assessment and Deployment Kit\Deployment Tools"
+        for a in (arch, "amd64", "x86", "arm64"):
+            p = tools / a / "Oscdimg" / "oscdimg.exe"
+            if p.exists():
+                return str(p)
+    return None
 
 
 def _find_7z():
@@ -45,19 +51,28 @@ ADK_INSTALL = ["winget", "install", "-e", "--id", "Microsoft.WindowsADK", "--acc
                "--accept-package-agreements", "--override", "/quiet /norestart /features OptionId.DeploymentTools"]
 
 
+ADK_TIMEOUT = 20 * 60  # seconds
+
+
 def can_install_oscdimg():
     return IS_WINDOWS and shutil.which("winget") is not None
 
 
 def install_oscdimg(log, cancel=None):
     """Installs oscdimg with winget. Raises with a readable message if it is still missing afterwards."""
+    failure = None
     try:
-        _run(ADK_INSTALL, log, cancel)
+        _run(ADK_INSTALL, log, cancel, timeout=ADK_TIMEOUT)
     except RuntimeError as e:  # winget also exits non-zero for "already installed"; the check below decides
-        log(str(e))
+        failure = str(e)
+        log(failure)
     if not _find_oscdimg():
-        raise RuntimeError("oscdimg is still missing. If the Windows ADK is already installed, add the "
-                           "'Deployment Tools' feature in Settings > Apps > Windows Assessment and Deployment Kit > Modify.")
+        msg = "oscdimg is still missing."
+        if failure:
+            msg += f"\nThe installer reported: {failure}"
+        msg += ("\nIf the Windows ADK is already installed, add the 'Deployment Tools' feature in "
+                "Settings > Apps > Windows Assessment and Deployment Kit > Modify.")
+        raise RuntimeError(msg)
     log("oscdimg installed.")
 
 
@@ -65,7 +80,8 @@ def missing_tools():
     """List of (tool, install hint) that are missing on this OS."""
     if IS_WINDOWS:
         if not _find_oscdimg():
-            return [("oscdimg", "winget install Microsoft.WindowsADK  (only the 'Deployment Tools' feature is needed)")]
+            return [("oscdimg", 'winget install -e --id Microsoft.WindowsADK --override "/quiet /norestart '
+                                '/features OptionId.DeploymentTools"  (installs only the Deployment Tools feature)')]
         return []
     missing = []
     if not _find_7z():
@@ -80,8 +96,9 @@ def _check(cancel):
         raise Cancelled("Build cancelled.")
 
 
-def _run(cmd, log, cancel=None):
+def _run(cmd, log, cancel=None, timeout=None):
     log("> " + " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd))
+    deadline = time.monotonic() + timeout if timeout else None
     with tempfile.TemporaryFile("w+", errors="replace") as out:
         p = subprocess.Popen([str(c) for c in cmd], stdout=out, stderr=subprocess.STDOUT, text=True,
                              creationflags=_NO_WINDOW)
@@ -94,6 +111,11 @@ def _run(cmd, log, cancel=None):
                     p.kill()
                     p.wait()
                     raise Cancelled("Build cancelled.")
+                if deadline and time.monotonic() > deadline:
+                    p.kill()
+                    p.wait()
+                    raise RuntimeError(f"{Path(cmd[0]).name} timed out after {timeout // 60} minutes. "
+                                       "The Windows admin prompt may be hidden behind another window.")
         out.seek(0)
         text = out.read()
     if p.returncode:
