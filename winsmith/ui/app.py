@@ -5,6 +5,7 @@ from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
+from .. import updater
 from . import theme
 from .window import MainWindow
 
@@ -44,6 +45,10 @@ def main():
     app.setApplicationName("Winsmith")
     app.setWindowIcon(app_icon())
     theme.apply(app)
+    exe = updater.exe_path()
+    if exe:
+        updater.cleanup_old(exe)  # the exe the last update replaced
     w = MainWindow()
     w.show()
+    w.check_for_updates()
     sys.exit(app.exec())

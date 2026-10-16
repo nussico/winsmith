@@ -218,6 +218,72 @@ class GuiTests(unittest.TestCase):
             page._finish("boom")
             self.assertFalse(page.build_btn.isEnabled())
 
+    REL = {"version": "9.9.9", "page": "https://github.com/nussico/winsmith/releases/tag/v9.9.9",
+           "asset_url": "https://github.com/nussico/winsmith/releases/download/v9.9.9/Winsmith.exe", "size": 3}
+
+    def test_banner_hidden_until_update_found(self):
+        self.assertTrue(self.w.banner.isHidden())
+        with mock.patch.object(self.win.updater, "is_frozen", return_value=True):
+            self.w._show_update(self.REL)
+        self.assertFalse(self.w.banner.isHidden())
+        self.assertIn("9.9.9", self.w.banner.text.text())
+        self.assertFalse(self.w.banner.update_btn.isHidden())
+        self.assertTrue(self.w.banner.copy_btn.isHidden())
+        self.w.banner.later_btn.click()
+        self.assertTrue(self.w.banner.isHidden())
+
+    def test_banner_for_python_install_shows_command_only(self):
+        with mock.patch.object(self.win.updater, "is_frozen", return_value=False):
+            self.w._show_update(self.REL)
+        self.assertTrue(self.w.banner.update_btn.isHidden())
+        self.assertFalse(self.w.banner.copy_btn.isHidden())
+
+    def test_check_skipped_when_not_due(self):
+        import time
+        self.w.last_update_check = time.time()
+        with mock.patch.object(self.win.updater, "check") as chk:
+            self.w.check_for_updates()
+        chk.assert_not_called()
+
+    def test_check_finds_update_and_stores_time(self):
+        self.w.last_update_check = 0
+        with mock.patch.object(self.win.updater, "check", return_value=self.REL),                 mock.patch.object(self.win.updater, "is_frozen", return_value=True),                 mock.patch("threading.Thread", lambda target, daemon=None: mock.Mock(start=target)):
+            self.w.check_for_updates()
+        self.app.processEvents()
+        self.assertFalse(self.w.banner.isHidden())
+        self.assertGreater(self.w.last_update_check, 0)
+
+    def test_update_blocked_while_building(self):
+        build = self.w.pages["Build"]
+        build.building = True
+        try:
+            with mock.patch.object(self.win.updater, "download") as dl:
+                self.w.start_update(self.REL)
+        finally:
+            build.building = False  # closing a "building" window in tearDown would ask a question
+        dl.assert_not_called()
+        self.assertIn("build", self.w.banner.text.text().lower())
+
+    def test_update_downloads_swaps_and_restarts(self):
+        up = self.win.updater
+        with mock.patch.object(up, "exe_path", return_value=Path(self.tmp.name) / "Winsmith.exe"),                 mock.patch.object(up, "download") as dl, mock.patch.object(up, "apply") as ap,                 mock.patch.object(up, "relaunch") as rl,                 mock.patch.object(self.win.QApplication, "quit") as quit_,                 mock.patch("threading.Thread", lambda target, daemon=None: mock.Mock(start=target)):
+            self.w.start_update(self.REL)
+            self.app.processEvents()
+        dl.assert_called_once()
+        ap.assert_called_once()
+        rl.assert_called_once()
+        quit_.assert_called()
+
+    def test_update_failure_keeps_app_and_shows_error(self):
+        up = self.win.updater
+        with mock.patch.object(up, "exe_path", return_value=Path(self.tmp.name) / "Winsmith.exe"),                 mock.patch.object(up, "download", side_effect=OSError("disk full")),                 mock.patch.object(up, "relaunch") as rl,                 mock.patch.object(up, "is_frozen", return_value=True),                 mock.patch("threading.Thread", lambda target, daemon=None: mock.Mock(start=target)):
+            self.w._show_update(self.REL)
+            self.w.banner.update_btn.click()
+            self.app.processEvents()
+        rl.assert_not_called()
+        self.assertIn("disk full", self.w.banner.text.text())
+        self.assertFalse(self.w.banner.update_btn.isHidden())
+
     def test_import_old_profile_maps_ids(self):
         path = Path(self.tmp.name) / "old.json"
         path.write_text(json.dumps({"name": "Old", "patches": ["telemetry", "adscopilot", "notaskview"]}),

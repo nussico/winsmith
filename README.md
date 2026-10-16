@@ -11,6 +11,9 @@ No admin rights needed, a build takes about a minute.
 **Windows**: get `Winsmith.exe` from the [latest release](https://github.com/nussico/winsmith/releases/latest) and run it.
 No install, no Python needed.
 
+Winsmith checks GitHub for a newer release once a day. A banner offers **Update**: it downloads the new exe,
+replaces the old one and restarts. Python installs only show the update command.
+
 ## Install with Python
 
 **Windows** (PowerShell):

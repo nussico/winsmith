@@ -2,13 +2,15 @@
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QMessageBox, QStackedWidget, QWidget
 
-from .. import __version__, profiles
+from .. import __version__, profiles, updater
 from ..patches import PATCHES, PRESETS, resolve
 from ..unattend import DEFAULTS, auto_mode
 from .pages.build import BuildPage
@@ -16,6 +18,7 @@ from .pages.patches import PatchesPage
 from .pages.setup import SetupPage
 from .pages.source import SourcePage
 from .stepper import Stepper
+from .update_banner import UpdateBanner
 from .widgets import Logo, hbox, label, vbox
 
 
@@ -38,6 +41,13 @@ PAGES = ["Source", "Patches", "Setup", "Build"]
 NARROW = 640
 
 
+class UpdateSignals(QObject):
+    """The update check and download run in threads; these hand the result to the UI thread."""
+    found = Signal(object)
+    progress = Signal(float)
+    done = Signal(object)
+
+
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -54,6 +64,11 @@ class MainWindow(QWidget):
         self.s = {k: type(d)(cfg.get(k, d)) for k, d in {**UI_DEFAULTS, "iso": "", "output": ""}.items()}
         self.s["password"] = ""
         self.patches = set(resolve(cfg.get("patches", PRESETS[DEFAULT_PRESET])))
+        self.last_update_check = float(cfg.get("last_update_check", 0) or 0)
+        self.upd = UpdateSignals()
+        self.upd.found.connect(self._show_update)
+        self.upd.progress.connect(lambda f: self.banner.busy(f"Downloading update… {int(f * 100)}%"))
+        self.upd.done.connect(self._update_done)
 
         root = vbox(self)
         bar = QWidget()
@@ -75,6 +90,8 @@ class MainWindow(QWidget):
         self.version.setObjectName("version")
         bl.addWidget(self.version)
         root.addWidget(bar)
+        self.banner = UpdateBanner(self.start_update, updater.UPDATE_COMMAND)
+        root.addWidget(self.banner)
 
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
@@ -93,6 +110,54 @@ class MainWindow(QWidget):
         for i, name in enumerate(PAGES, 1):
             QShortcut(QKeySequence(f"Ctrl+{i}"), self, lambda n=name: self.show_page(n))
         self.show_page("Source")
+
+    # ---------- updates ----------
+    def check_for_updates(self, force=False):
+        """Looks for a newer release in the background, at most once a day."""
+        if not force and not updater.due(self.last_update_check):
+            return
+        self.last_update_check = time.time()
+
+        def work():
+            rel = updater.check(__version__)
+            if rel:
+                self.upd.found.emit(rel)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_update(self, rel):
+        self.banner.show_release(rel, updater.is_frozen())
+
+    def start_update(self, rel):
+        build = self.pages["Build"]
+        if build.building or build.installing:
+            self.banner.set_text("Finish the current build or install first, then update.")
+            return
+        exe = updater.exe_path()
+        if exe is None or not rel or not rel.get("asset_url"):
+            return
+        self.banner.busy("Downloading update… 0%")
+
+        def work():
+            new = exe.with_name(exe.stem + ".new" + exe.suffix)
+            try:
+                updater.download(rel["asset_url"], new, rel["size"], self.upd.progress.emit)
+                updater.apply(new, exe)
+                updater.relaunch(exe)
+                self.upd.done.emit(None)
+            except Exception as e:  # show any failure in the banner, keep the current version running
+                new.unlink(missing_ok=True)
+                self.upd.done.emit(str(e) or type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_done(self, err):
+        if err:
+            self.banner.show_release(self.banner.rel, True)
+            self.banner.set_text(f"Update failed: {err}")
+            return
+        self.save_config()
+        QApplication.quit()
 
     # ---------- navigation ----------
     def show_page(self, name):
@@ -177,6 +242,7 @@ class MainWindow(QWidget):
     def save_config(self):
         data = {k: v for k, v in self.s.items() if k not in SECRET_KEYS}
         data["patches"] = self.selected()
+        data["last_update_check"] = self.last_update_check
         try:
             CONFIG.parent.mkdir(parents=True, exist_ok=True)
             CONFIG.write_text(json.dumps(data, indent=2), encoding="utf-8")

@@ -90,6 +90,7 @@ def stylesheet(t):
     QLabel[role="accent"] {{ color: {t['accent']}; font-weight: 600; }}
 
     #appbar {{ background: {t['surface']}; border-bottom: 1px solid {t['border']}; }}
+    #updatebar {{ background: {t['accent_soft']}; border-bottom: 1px solid {t['border']}; }}
     #brand {{ font-size: 12pt; font-weight: 600; }}
     #version {{ color: {t['faint']}; font-size: 9pt; }}
     #footer {{ background: {t['surface']}; border-top: 1px solid {t['border']}; }}
