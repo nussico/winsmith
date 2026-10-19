@@ -142,18 +142,45 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(page, "Source")
         self.assertIs(field, self.w.pages["Source"].field)
 
-    def test_config_round_trip_without_password(self):
+    def test_bad_remembered_iso_or_config_still_starts(self):
+        for body in ('{"iso": "D:\\\\"}', '{"iso": "."}', '[]', 'null', '{"last_update_check": "x"}',
+                     '{"last_update_check": NaN}', '{"last_update_check": 1' + "0" * 400 + "}"):
+            self.win.CONFIG.write_text(body, encoding="utf-8")
+            w2 = self.new_window()
+            try:
+                self.assertEqual(w2.last_update_check, 0.0)
+            finally:
+                w2.close()
+                w2.deleteLater()
+
+    def test_old_config_keys_are_ignored(self):
+        self.win.CONFIG.write_text(json.dumps({"computer": "OLD", "password": "x", "patches": ["tracking"]}), encoding="utf-8")
+        w2 = self.new_window()
+        try:
+            self.assertEqual((w2.s["computer"], w2.s["password"]), ("", ""))
+            self.assertEqual(w2.pages["Patches"].matching(), "Basic")
+        finally:
+            w2.close()
+            w2.deleteLater()
+
+    def test_only_the_base_iso_is_remembered(self):
+        from winsmith import iso as iso_mod
         self.w.s["password"] = "secret"
+        self.w.s["wifi_password"] = "secret123"
         self.w.s["computer"] = "PC1"
+        self.w.s["iso"] = "C:/isos/Win11.iso"
+        self.w.s["output"] = "C:/out/mine.iso"
         self.w.pages["Patches"].apply_choice("Everything")
         self.w.save_config()
         data = json.loads(self.win.CONFIG.read_text(encoding="utf-8"))
-        self.assertNotIn("password", data)
+        self.assertEqual(set(data), {"iso", "last_update_check"})
         w2 = self.new_window()
         try:
-            self.assertEqual(w2.s["computer"], "PC1")
+            self.assertEqual(w2.s["iso"], "C:/isos/Win11.iso")
+            self.assertEqual(w2.s["computer"], "")
             self.assertEqual(w2.s["password"], "")
-            self.assertEqual(w2.pages["Patches"].matching(), "Everything")
+            self.assertEqual(w2.pages["Patches"].matching(), "Basic")
+            self.assertTrue(iso_mod.is_auto_name(w2.s["output"]))
         finally:
             w2.close()
             w2.deleteLater()

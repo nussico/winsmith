@@ -27,6 +27,14 @@ def output_name(source_iso):
     return f"Winsmith_{Path(source_iso).stem}_v{__version__}_{date.today():%Y-%m-%d}.iso"
 
 
+def default_output(source_iso):
+    """Path for the new ISO next to the source, or "" when the source is not a usable file path (like "D:\\" or ".")."""
+    try:
+        return str(Path(source_iso).with_name(output_name(source_iso)))
+    except ValueError:
+        return ""
+
+
 def is_auto_name(path):
     """True for a name output_name() made (or the plain Winsmith_<source>.iso of older versions)."""
     n = Path(path).name

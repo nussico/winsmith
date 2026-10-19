@@ -56,13 +56,16 @@ class SourcePage(Page):
             self.path.setText(clean)  # calls back here with the clean value
             return
         self.win.s["iso"] = raw
+        out = self.win.s["output"]
+        if Path(raw).is_file():  # keep a name the user typed, and the folder they chose
+            if not out:
+                self.win.pages["Build"].set_output(iso.default_output(raw))
+            elif iso.is_auto_name(out):
+                self.win.pages["Build"].set_output(str(Path(out).with_name(iso.output_name(raw))))
         self.refresh()
 
     def set_path(self, p):
-        self.path.setText(str(Path(p)))
-        out = self.win.s["output"]
-        if not out or iso.is_auto_name(out):  # keep a name the user typed
-            self.win.pages["Build"].set_output(str(Path(p).with_name(iso.output_name(p))))
+        self.path.setText(str(Path(p)))  # _typed names the output
 
     def browse(self):
         start = str(Path(self.win.s["iso"]).parent) if self.win.s["iso"] else ""
