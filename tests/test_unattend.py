@@ -173,15 +173,16 @@ class UnattendTests(unittest.TestCase):
 
 
 class WifiTests(unittest.TestCase):
-    CFG = {"wifi_ssid": "Home & Co", "wifi_password": "p<ss>word1"}
+    CFG = {"wifi": True, "wifi_ssid": "Home & Co", "wifi_password": "p<ss>word1"}
 
     def test_off_without_ssid_and_validation(self):
         self.assertFalse(wifi_on({}))
+        self.assertFalse(wifi_on({**self.CFG, "wifi": False}))  # the toggle decides
         self.assertTrue(wifi_on(self.CFG))
         self.assertIsNotNone(wifi_error("x", "short"))
         self.assertIsNone(wifi_error("x", "", "open"))
         self.assertIsNotNone(wifi_error("x" * 33, "password1"))
-        self.assertFalse(wifi_on({"wifi_ssid": "x", "wifi_password": "short"}))
+        self.assertFalse(wifi_on({"wifi": True, "wifi_ssid": "x", "wifi_password": "short"}))
 
     def test_script_escapes_xml(self):
         import base64, re
@@ -200,7 +201,7 @@ class WifiTests(unittest.TestCase):
         self.assertIsNone(wifi_error("x", "a" * 64, "WPA2"))
 
     def test_padded_password_agrees_between_unattend_and_build(self):
-        cfg = {"wifi_ssid": "x", "wifi_password": "abcdefg "}
+        cfg = {"wifi": True, "wifi_ssid": "x", "wifi_password": "abcdefg "}
         self.assertTrue(wifi_on(cfg))
         self.assertIn("winsmith-wifi.ps1", make_unattend(cfg, []))
 

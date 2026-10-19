@@ -131,9 +131,15 @@ class SetupPage(Page):
     def _wifi_section(self):
         s = self.win.s
         sec = Section("Wi-Fi")
+        self.wifi = ToggleRow("Join a Wi-Fi network automatically",
+                              "The PC connects to this network on its own after Windows is installed.", s["wifi"])
+        self.wifi.toggled.connect(lambda on: self._set("wifi", on))
+        sec.body.addWidget(self.wifi)
+        self.wifi_box = QWidget()
+        box = vbox(self.wifi_box, 0)
+        sec.body.addWidget(self.wifi_box)
         g = ResponsiveGrid()
-        self.f_ssid = Field("Network name", self._line("wifi_ssid"),
-                            hint="Leave empty to skip. The PC joins this network on its own.")
+        self.f_ssid = Field("Network name", self._line("wifi_ssid"), hint="Exactly as it appears in the Wi-Fi list.")
         g.add(self.f_ssid)
         self.f_wpass = Field("Password", self._line("wifi_password"), password=True,
                              hint="Stored in plain text on the ISO. Never saved in settings or profiles.")
@@ -142,11 +148,12 @@ class SetupPage(Page):
         self.wsec.setCurrentIndex(max(0, self.wsec.findData(s["wifi_security"])))
         self.wsec.currentIndexChanged.connect(lambda _: self._set("wifi_security", self.wsec.currentData()))
         g.add(Field("Security", self.wsec))
-        sec.body.addWidget(g)
-        sec.body.addSpacing(14)
+        box.addSpacing(14)
+        box.addWidget(g)
+        box.addSpacing(14)
         self.whidden = ToggleRow("Hidden network", "The network does not broadcast its name.", s["wifi_hidden"])
         self.whidden.toggled.connect(lambda on: self._set("wifi_hidden", on))
-        sec.body.addWidget(self.whidden)
+        box.addWidget(self.whidden)
         return sec
 
     # ---------- apps ----------
@@ -293,6 +300,7 @@ class SetupPage(Page):
             self.edition.setCurrentText(s["edition"] or ASK)
             self.install.setCurrentIndex(max(0, self.install.findData(s["auto_install"])))
             self.f_pass.input.setText(s["password"])
+            self.wifi.setChecked(s["wifi"])
             self.f_ssid.input.setText(s["wifi_ssid"])
             self.f_wpass.input.setText(s["wifi_password"])
             self.wsec.setCurrentIndex(max(0, self.wsec.findData(s["wifi_security"])))
@@ -316,7 +324,9 @@ class SetupPage(Page):
                     problem = (err, self.f_lang if err.startswith("Windows language") else self.f_kbd)
                 elif auto_install_error(v):
                     problem = (auto_install_error(v), self.f_install)
-        err = wifi_error(v["wifi_ssid"], v["wifi_password"], v["wifi_security"])
+        err = None
+        if v["wifi"]:
+            err = "Enter the Wi-Fi network name." if not v["wifi_ssid"].strip() else                 wifi_error(v["wifi_ssid"], v["wifi_password"], v["wifi_security"])
         if err and not problem:
             problem = (err, self.f_wpass if "password" in err else self.f_ssid)
         for f in (self.f_user, self.f_comp, self.f_lang, self.f_kbd, self.f_install, self.f_ssid, self.f_wpass):
@@ -324,6 +334,7 @@ class SetupPage(Page):
         return problem
 
     def refresh(self):
+        self.wifi_box.setVisible(self.win.s["wifi"])
         for sec in self.sections:
             sec.setVisible(self.win.s["unattended"])
         mode = self.win.s["auto_install"]
