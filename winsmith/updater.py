@@ -1,10 +1,14 @@
 """Check GitHub for a newer release and swap the running Winsmith.exe for it. No Qt in here."""
+import hashlib
+import http.client
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,7 +32,11 @@ def exe_path():
     if not is_frozen():
         return None
     compiled = globals().get("__compiled__")
-    return Path(getattr(compiled, "original_argv0", None) or sys.argv[0]).resolve()
+    name = Path(getattr(compiled, "original_argv0", None) or sys.argv[0]).name
+    if os.name == "nt" and not Path(name).suffix:
+        name += ".exe"
+    folder = getattr(compiled, "containing_dir", None)  # independent of the current directory
+    return (Path(folder) / name).resolve() if folder else Path(sys.argv[0]).resolve()
 
 
 def _version(text):
@@ -42,7 +50,9 @@ def is_newer(latest, current):
 
 
 def due(last_check, now=None):
-    return (time.time() if now is None else now) - (last_check or 0) >= CHECK_EVERY
+    now = time.time() if now is None else now
+    last_check = last_check or 0
+    return last_check > now or now - last_check >= CHECK_EVERY  # a clock set in the past must not block checks
 
 
 def _trusted(url):
@@ -50,9 +60,16 @@ def _trusted(url):
     return p.scheme == "https" and p.netloc == "github.com" and p.path.startswith(f"/{REPO}/releases/download/")
 
 
+class _HttpsOnly(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlparse(newurl).scheme != "https":
+            raise urllib.error.URLError("Refusing a redirect away from https.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _open(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Winsmith-updater"})
-    return urllib.request.urlopen(req, timeout=TIMEOUT)
+    return urllib.request.build_opener(_HttpsOnly).open(req, timeout=TIMEOUT)
 
 
 def _get_json(url):
@@ -70,10 +87,13 @@ def parse_release(data):
             return None
         asset = next((a for a in data.get("assets", []) if a.get("name") == ASSET), None)
         url = asset.get("browser_download_url") if asset else None
-        if not _trusted(url):
+        size = int(asset.get("size", 0)) if asset else 0
+        if not _trusted(url) or size <= 0:  # without a size a truncated download could not be noticed
             url = None
+        digest = str(asset.get("digest") or "") if asset and url else ""
+        sha256 = digest[7:].lower() if digest.startswith("sha256:") else ""
         return {"version": version, "page": data.get("html_url", ""), "asset_url": url,
-                "size": int(asset.get("size", 0)) if asset and url else 0}
+                "size": size if url else 0, "sha256": sha256}
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
 
@@ -81,7 +101,7 @@ def parse_release(data):
 def latest_release():
     try:
         return parse_release(_get_json(API))
-    except (OSError, ValueError):  # offline, rate limited, bad JSON: stay silent
+    except (OSError, ValueError, http.client.HTTPException):  # offline, rate limited, bad JSON: stay silent
         return None
 
 
@@ -91,12 +111,13 @@ def check(current):
     return rel if rel and is_newer(rel["version"], current) else None
 
 
-def download(url, dest, size, progress=None):
-    """Download to `dest` and check the size. `progress` gets a 0..1 fraction."""
+def download(url, dest, size, progress=None, sha256=""):
+    """Download to `dest` and check the size (and the SHA-256, when GitHub gave one). `progress` gets a 0..1 fraction."""
     if not _trusted(url):
         raise RuntimeError("Refusing to download from an unexpected address.")
     dest = Path(dest)
     done = 0
+    h = hashlib.sha256()
     try:
         with _open(url) as src, open(dest, "wb") as out:
             while True:
@@ -104,11 +125,14 @@ def download(url, dest, size, progress=None):
                 if not chunk:
                     break
                 out.write(chunk)
+                h.update(chunk)
                 done += len(chunk)
                 if progress and size:
                     progress(min(done / size, 1.0))
         if size and done != size:
             raise RuntimeError(f"Downloaded file has the wrong size ({done} instead of {size} bytes).")
+        if sha256 and h.hexdigest() != sha256:
+            raise RuntimeError("Downloaded file does not match its checksum.")
     except BaseException:
         dest.unlink(missing_ok=True)
         raise
@@ -132,13 +156,35 @@ def apply(new_exe, current):
         raise
 
 
-def cleanup_old(current):
+def cleanup_old(current, wait=0):
+    """Delete the exe the last update replaced. The previous process may still hold it for a moment."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            _old_path(Path(current)).unlink(missing_ok=True)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.5)
+
+
+def cleanup_cache(current_version):
+    """Remove the unpacked payloads of older versions (onefile cache: %LOCALAPPDATA%/Winsmith/<version>)."""
+    base = os.environ.get("LOCALAPPDATA")
+    if not base:
+        return
+    root = Path(base) / "Winsmith"
     try:
-        _old_path(Path(current)).unlink(missing_ok=True)
-    except OSError:  # still locked by the previous process: next start
+        for d in root.iterdir():
+            if d.is_dir() and _version(d.name) is not None and d.name != current_version:
+                shutil.rmtree(d, ignore_errors=True)
+    except OSError:
         pass
 
 
 def relaunch(exe):
     flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
-    subprocess.Popen([str(exe)], creationflags=flags, close_fds=True)
+    # The Nuitka onefile bootstrap decides parent/child from NUITKA_* variables; the new exe must start fresh.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NUITKA_")}
+    subprocess.Popen([str(exe)], creationflags=flags, close_fds=True, env=env)
