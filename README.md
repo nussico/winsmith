@@ -54,8 +54,13 @@ and shows the error if it fails. oscdimg is also found in x86 and ARM64 ADK inst
   keyboard, time zone, edition, skip setup screens.
 - **Automatic install** (optional): installs on the best SSD (skips USB and disks under 64 GB) or on disk 0
   without asking. This **wipes that disk**; the Build page shows which disk it would pick on this PC.
+- **Apps**: search winget (or type an ID like `Mozilla.Firefox`) and the apps install after the first sign-in.
+  The PC needs internet then; progress is in `C:\Windows\Setup\Scripts\winsmith-apps.log`. Searching needs winget
+  on the PC running Winsmith, otherwise type the ID.
+- **Wi-Fi**: the PC joins your network on its own (WPA2, WPA3 or open, hidden networks too). Leave the name empty to skip.
+- **ISO name**: the file name and the disc label carry the date and Winsmith version, e.g. `Winsmith_Win11_v0.2.5_2026-10-19.iso`.
 - **Profiles**: save your patches and Setup answers as a profile, export it as `.json` and import it on another PC.
-  The password is never saved.
+  Passwords are left out unless you answer Yes when asked.
 - **Patches**: 28 tweaks in 8 groups, all checked on a real Windows 11 install. Safe only: nothing turns off
   Defender, the firewall, UAC or Windows Update.
 
@@ -74,7 +79,18 @@ Presets: **Basic** (Install group, default), **Recommended** (Basic + less bloat
 Store, winget, Calculator, Photos, Xbox login and Game Bar are never removed.
 Per-user tweaks are applied again at each new user's first logon, because Windows resets some of them.
 
-Not yet: downloading Windows, winget apps, Wi-Fi.
+Not yet: downloading Windows.
+
+## Security notes
+
+- The account password is stored base64-encoded in `autounattend.xml`. That is not encryption.
+- The Wi-Fi password is stored in plain text in `winsmith-wifi.ps1` on the ISO. The script deletes itself after the
+  first sign-in; if that fails (for example a non-admin first user) it says so in `winsmith.log`.
+- Profiles keep passwords only if you say Yes, and then in plain text. Share exported profiles with care.
+- Winsmith's own settings (`config.json`) never contain passwords.
+- Anyone with the ISO can read these, so keep it private.
+- `Winsmith.exe` is not code-signed, so Windows Defender may warn about it (for example `Bearfoos.A!ml`). That is a
+  false positive of its heuristics; you can check the file against the release page or run from source instead.
 
 ## Check an installed PC
 
@@ -95,7 +111,7 @@ python main.py
 ```
 
 Needs Python 3.9+. The GUI uses Qt (PySide6); on some minimal Linux setups Qt also needs `libxcb-cursor0`.
-Settings are kept in `%APPDATA%\Winsmith\config.json` (Linux: `~/.config/Winsmith/config.json`); the password is never saved.
+Settings are kept in `%APPDATA%\Winsmith\config.json` (Linux: `~/.config/Winsmith/config.json`); passwords are never saved there.
 
 Build the exe: `python build_exe.py` (Nuitka, writes `dist/Winsmith.exe`). Use Nuitka 4.4 or newer: 4.3 (the latest
 on PyPI) builds an exe that crashes on start with Python 3.14 and PySide6, so build in a venv with a 4.4 release candidate.
