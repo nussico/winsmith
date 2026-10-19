@@ -27,7 +27,7 @@ DEFAULTS = {
     "language": "en-US", "keyboard": "en-US", "timezone": "W. Europe Standard Time",
     "edition": "",  # "" = ask during setup
     "auto_install": "off",  # off | best_ssd | disk0: install without asking which disk (wipes it)
-    "wifi_ssid": "", "wifi_password": "", "wifi_security": "WPA2", "wifi_hidden": False,
+    "wifi": False, "wifi_ssid": "", "wifi_password": "", "wifi_security": "WPA2", "wifi_hidden": False,
     "apps": [],  # winget package IDs, installed after the first sign-in
 }
 AUTO_INSTALL = ("off", "best_ssd", "disk0")
@@ -107,7 +107,7 @@ def wifi_error(ssid, password, security="WPA2"):
 
 def wifi_on(cfg):
     u = {**DEFAULTS, **cfg}
-    return (bool(u["wifi_ssid"].strip()) and u["wifi_security"] in WIFI_SECURITY
+    return (bool(u["wifi"]) and bool(u["wifi_ssid"].strip()) and u["wifi_security"] in WIFI_SECURITY
             and wifi_error(u["wifi_ssid"], u["wifi_password"], u["wifi_security"]) is None)
 
 

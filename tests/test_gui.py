@@ -363,6 +363,8 @@ class GuiTests(unittest.TestCase):
 
     def test_wifi_validation_and_profile_excludes_password(self):
         page = self.w.pages["Setup"]
+        page.wifi.setChecked(True)
+        self.assertIsNotNone(page.validate())  # no network name yet
         page.f_ssid.input.setText("Home")
         page.f_wpass.input.setText("short")
         self.assertIsNotNone(page.validate())
