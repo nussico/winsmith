@@ -238,6 +238,9 @@ class BuildPage(Page):
 
     # ---------- build ----------
     def build(self):
+        out = self.win.s["output"]
+        if out and iso.is_auto_name(out):  # an automatic name gets today's date, not the day it was picked
+            self.set_output(str(Path(out).with_name(iso.output_name(self.win.s["iso"]))))
         problem = self.win.check()
         if problem:
             msg, page, field = problem

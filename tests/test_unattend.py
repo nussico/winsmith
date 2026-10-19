@@ -3,8 +3,9 @@ import unittest
 import xml.etree.ElementTree as ET
 
 from winsmith.patches import PATCHES, PRESETS, REMOVE_APPS
-from winsmith.unattend import account_error, auto_install_error, encode_password, is_protected, make_patch_script, make_unattend, region_error
+from winsmith.unattend import wifi_error, wifi_on, make_wifi_script, app_id_ok, make_apps_script, account_error, auto_install_error, encode_password, is_protected, make_patch_script, make_unattend, region_error
 
+CRLF = chr(13) + chr(10)
 NS = {"u": "urn:schemas-microsoft-com:unattend"}
 
 
@@ -169,6 +170,84 @@ class UnattendTests(unittest.TestCase):
             "Disk 1: Crucial MX500 SSD, 1000 GB, SSD",  # the install media disk is skipped
             "none",
         ])
+
+
+class WifiTests(unittest.TestCase):
+    CFG = {"wifi_ssid": "Home & Co", "wifi_password": "p<ss>word1"}
+
+    def test_off_without_ssid_and_validation(self):
+        self.assertFalse(wifi_on({}))
+        self.assertTrue(wifi_on(self.CFG))
+        self.assertIsNotNone(wifi_error("x", "short"))
+        self.assertIsNone(wifi_error("x", "", "open"))
+        self.assertIsNotNone(wifi_error("x" * 33, "password1"))
+        self.assertFalse(wifi_on({"wifi_ssid": "x", "wifi_password": "short"}))
+
+    def test_script_escapes_xml(self):
+        import base64, re
+        s = make_wifi_script(self.CFG)
+        xml = base64.b64decode(re.search(r"FromBase64String\('([^']+)'", s).group(1)).decode()
+        self.assertIn("Home &amp; Co", xml)
+        self.assertIn("p&lt;ss&gt;word1", xml)
+        self.assertIn("WPA2PSK", xml)
+        self.assertNotIn("word1", s)  # nothing user-typed reaches the script text
+
+    def test_rejects_line_separators_and_unknown_security(self):
+        self.assertIsNotNone(wifi_error("x '@", "password1"))
+        self.assertIsNotNone(wifi_error("x", "password1"))
+        self.assertIsNotNone(wifi_error("x", "password1", "bogus"))
+        self.assertIsNotNone(wifi_error("x", "a" * 64, "WPA3"))
+        self.assertIsNone(wifi_error("x", "a" * 64, "WPA2"))
+
+    def test_padded_password_agrees_between_unattend_and_build(self):
+        cfg = {"wifi_ssid": "x", "wifi_password": "abcdefg "}
+        self.assertTrue(wifi_on(cfg))
+        self.assertIn("winsmith-wifi.ps1", make_unattend(cfg, []))
+
+    def test_unattend_runs_script_at_specialize_and_final_at_logon(self):
+        x = make_unattend(self.CFG, [])
+        self.assertEqual(x.count("winsmith-wifi.ps1"), 2)
+        self.assertIn("winsmith-wifi.ps1 -Final", x)
+        ET.fromstring(x)
+        self.assertNotIn("winsmith-wifi", make_unattend({}, []))
+
+
+class AppsTests(unittest.TestCase):
+    def test_app_id_ok(self):
+        for good in ("Mozilla.Firefox", "7zip.7zip", "Microsoft.VisualStudioCode", "Git.Git", "A-B.C+D"):
+            self.assertTrue(app_id_ok(good), good)
+        for bad in ("foo", "x'; rm -rf", "a b.c", "", None, "a..b", ".a.b", "a.b;c"):
+            self.assertFalse(app_id_ok(bad), bad)
+
+    def test_apps_script_installs_each_quoted_id_and_waits(self):
+        s = make_apps_script(["Mozilla.Firefox", "7zip.7zip"])
+        self.assertIn("'Mozilla.Firefox', '7zip.7zip'", s)
+        self.assertIn("Test-NetConnection", s)
+        self.assertIn("AddMinutes(15)", s)
+        self.assertIn("--accept-package-agreements", s)
+        self.assertTrue(s.endswith(chr(13) + chr(10)))
+
+    def test_first_logon_command_only_with_valid_apps(self):
+        for u in (True, False):
+            xml = make_unattend({"unattended": u, "apps": ["Mozilla.Firefox", "x'; rm", "Mozilla.Firefox"]}, [])
+            root = ET.fromstring(xml)
+            cmds = [e.text for e in root.iter("{urn:schemas-microsoft-com:unattend}CommandLine")]
+            self.assertEqual(len(cmds), 1)
+            self.assertIn("winsmith-apps.ps1", cmds[0])
+        self.assertNotIn("FirstLogonCommands", make_unattend({"apps": []}, []))
+        self.assertNotIn("FirstLogonCommands", make_unattend({"apps": ["nope"]}, []))
+
+
+class IsoNameTests(unittest.TestCase):
+    def test_output_name_and_label(self):
+        from winsmith import __version__, iso
+        name = iso.output_name("/x/Win11_English_x64.iso")
+        self.assertRegex(name, rf"Winsmith_Win11_English_x64_v{__version__}_\d{{4}}-\d{{2}}-\d{{2}}\.iso")
+        self.assertTrue(iso.is_auto_name(name))
+        self.assertTrue(iso.is_auto_name("Winsmith_Win11.iso"))  # name made by older versions
+        self.assertFalse(iso.is_auto_name("my-own-name.iso"))
+        self.assertLessEqual(len(iso.volume_label()), 32)
+        self.assertRegex(iso.volume_label(), r"WINSMITH_[0-9_]+_\d{8}")
 
 
 if __name__ == "__main__":

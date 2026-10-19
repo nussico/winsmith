@@ -1,10 +1,14 @@
 """Step 3: answer Windows Setup's questions in advance."""
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLineEdit
+import threading
 
-from ...unattend import GENERIC_KEYS, account_error, auto_install_error, region_error
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import QLineEdit, QWidget
+
+from ... import winget
+from ...unattend import (GENERIC_KEYS, WIFI_SECURITY, account_error, app_id_ok, auto_install_error, region_error,
+                         wifi_error)
 from ..page import Page
-from ..widgets import Combo, Divider, Field, ResponsiveGrid, Section, ToggleRow, button, set_prop
+from ..widgets import Combo, Divider, Field, ResponsiveGrid, Section, ToggleRow, button, hbox, label, set_prop, vbox
 
 ASK = "Ask during setup"
 INSTALL_MODES = [("Off: choose the disk during setup", "off"),
@@ -36,6 +40,15 @@ TIMEZONES = ["UTC", "GMT Standard Time", "W. Europe Standard Time", "Central Eur
              "Central Standard Time", "Mountain Standard Time", "Pacific Standard Time", "Alaskan Standard Time",
              "Hawaiian Standard Time", "SA Pacific Standard Time", "E. South America Standard Time",
              "Argentina Standard Time", "South Africa Standard Time"]
+
+
+WIFI_SECURITY_LABELS = [(label_, key) for key, (_, label_) in WIFI_SECURITY.items()]
+MAX_RESULTS = 20
+
+
+class SearchSignals(QObject):
+    """winget search runs in a thread; this hands the answer to the UI thread."""
+    done = Signal(object, object)  # results, error text
 
 
 class SetupPage(Page):
@@ -107,10 +120,139 @@ class SetupPage(Page):
         self.sections = [acc, reg, ed, self.inst]
         for sec in self.sections:
             self.body.addWidget(sec)
+        self.body.addWidget(self._wifi_section())
+        self.body.addWidget(self._apps_section())
 
         self.add_left(button("Back", lambda: win.show_page("Patches"), "ghost"))
         self.add_right(button("Next", lambda: win.show_page("Build"), "primary"))
         self.refresh()
+
+    # ---------- wifi ----------
+    def _wifi_section(self):
+        s = self.win.s
+        sec = Section("Wi-Fi")
+        g = ResponsiveGrid()
+        self.f_ssid = Field("Network name", self._line("wifi_ssid"),
+                            hint="Leave empty to skip. The PC joins this network on its own.")
+        g.add(self.f_ssid)
+        self.f_wpass = Field("Password", self._line("wifi_password"), password=True,
+                             hint="Stored in plain text on the ISO. Never saved in settings or profiles.")
+        g.add(self.f_wpass)
+        self.wsec = Combo(WIFI_SECURITY_LABELS)
+        self.wsec.setCurrentIndex(max(0, self.wsec.findData(s["wifi_security"])))
+        self.wsec.currentIndexChanged.connect(lambda _: self._set("wifi_security", self.wsec.currentData()))
+        g.add(Field("Security", self.wsec))
+        sec.body.addWidget(g)
+        sec.body.addSpacing(14)
+        self.whidden = ToggleRow("Hidden network", "The network does not broadcast its name.", s["wifi_hidden"])
+        self.whidden.toggled.connect(lambda on: self._set("wifi_hidden", on))
+        sec.body.addWidget(self.whidden)
+        return sec
+
+    # ---------- apps ----------
+    def _apps_section(self):
+        sec = Section("Apps")
+        self.signals = SearchSignals()
+        self.signals.done.connect(self._show_results)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search winget, or type an ID like Mozilla.Firefox")
+        self.search_edit.returnPressed.connect(self._search)
+        self.f_apps = Field("Install after Windows is set up", self.search_edit,
+                            hint="Installed with winget at the first sign-in. The PC needs internet then.")
+        self.search_btn = button("Search", self._search)
+        self.add_btn = button("Add ID", self._add_typed, "ghost")
+        self.f_apps.row.addWidget(self.search_btn)
+        self.f_apps.row.addWidget(self.add_btn)
+        sec.body.addWidget(self.f_apps)
+        self.has_winget = winget.available()
+        self.search_btn.setVisible(self.has_winget)
+        if not self.has_winget:
+            self.f_apps.hint.setText("winget was not found on this PC, so type the package ID "
+                                     "(like Mozilla.Firefox) and press Add ID.")
+        self.results = QWidget()
+        self.results_box = vbox(self.results, 4)
+        sec.body.addWidget(self.results)
+        sec.body.addSpacing(10)
+        self.chosen = QWidget()
+        self.chosen_box = vbox(self.chosen, 4)
+        sec.body.addWidget(self.chosen)
+        self._fill_chosen()
+        return sec
+
+    def _search(self):
+        query = self.search_edit.text().strip()
+        if not query or not self.has_winget:
+            return
+        self.f_apps.set_error(None)
+        self.search_btn.setEnabled(False)
+        self.search_btn.setText("Searching…")
+
+        def work():
+            try:
+                self.signals.done.emit(winget.search(query), None)
+            except Exception as e:
+                self.signals.done.emit([], str(e) or type(e).__name__)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_results(self, found, err):
+        self.search_btn.setEnabled(True)
+        self.search_btn.setText("Search")
+        self._clear(self.results_box)
+        if err or not found:
+            self.f_apps.set_error(err or "Nothing found.")
+        for app in found[:MAX_RESULTS]:
+            self.results_box.addWidget(self._row(f"{app['name']}  ·  {app['id']}  {app['version']}", app["id"]))
+
+    def _add_typed(self):
+        text = self.search_edit.text().strip()
+        if not app_id_ok(text):
+            self.f_apps.set_error("That is not a winget package ID. Search for it, or type one like Mozilla.Firefox.")
+            return
+        self.f_apps.set_error(None)
+        self._add(text)
+        self.search_edit.clear()
+
+    def _pick(self, app_id):
+        """Add from the search results, then reset the search for the next one."""
+        self._add(app_id)
+        self.search_edit.clear()
+        self._clear(self.results_box)
+        self.f_apps.set_error(None)
+
+    def _add(self, app_id):
+        if app_id not in self.win.s["apps"]:
+            self._set("apps", self.win.s["apps"] + [app_id])
+        self._fill_chosen()
+
+    def _remove(self, app_id):
+        self._set("apps", [a for a in self.win.s["apps"] if a != app_id])
+        self._fill_chosen()
+
+    def _row(self, text, app_id, chosen=False):
+        row = QWidget()
+        lay = hbox(row, 8)
+        lay.addWidget(label(text, wrap=True), 1)
+        if chosen:
+            lay.addWidget(button("Remove", lambda: self._remove(app_id), "ghost"))
+        else:
+            added = app_id in self.win.s["apps"]
+            b = button("Added" if added else "Add", lambda: self._pick(app_id), "ghost")
+            b.setEnabled(not added)
+            lay.addWidget(b)
+        return row
+
+    @staticmethod
+    def _clear(box):
+        while box.count():
+            w = box.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+
+    def _fill_chosen(self):
+        self._clear(self.chosen_box)
+        for app_id in self.win.s["apps"]:
+            self.chosen_box.addWidget(self._row(app_id, app_id, chosen=True))
 
     def _set(self, key, value):
         self.win.s[key] = value
@@ -150,6 +292,12 @@ class SetupPage(Page):
             self.tz.setCurrentText(s["timezone"])
             self.edition.setCurrentText(s["edition"] or ASK)
             self.install.setCurrentIndex(max(0, self.install.findData(s["auto_install"])))
+            self.f_pass.input.setText(s["password"])
+            self.f_ssid.input.setText(s["wifi_ssid"])
+            self.f_wpass.input.setText(s["wifi_password"])
+            self.wsec.setCurrentIndex(max(0, self.wsec.findData(s["wifi_security"])))
+            self.whidden.setChecked(s["wifi_hidden"])
+            self._fill_chosen()
         finally:
             self.loading = False
         self.refresh()
@@ -168,7 +316,10 @@ class SetupPage(Page):
                     problem = (err, self.f_lang if err.startswith("Windows language") else self.f_kbd)
                 elif auto_install_error(v):
                     problem = (auto_install_error(v), self.f_install)
-        for f in (self.f_user, self.f_comp, self.f_lang, self.f_kbd, self.f_install):
+        err = wifi_error(v["wifi_ssid"], v["wifi_password"], v["wifi_security"])
+        if err and not problem:
+            problem = (err, self.f_wpass if "password" in err else self.f_ssid)
+        for f in (self.f_user, self.f_comp, self.f_lang, self.f_kbd, self.f_install, self.f_ssid, self.f_wpass):
             f.set_error(problem[0] if problem and problem[1] is f else None)
         return problem
 

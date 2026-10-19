@@ -1,4 +1,4 @@
-"""Saved profiles: a named set of patches plus the Setup answers (never the password).
+"""Saved profiles: a named set of patches plus the Setup answers (passwords only when the user chose to keep them).
 
 File format: {"name": str, "version": 1, "patches": [ids], "setup": {key: value}}
 """
@@ -7,10 +7,10 @@ import re
 from pathlib import Path
 
 from .patches import PATCHES, resolve
-from .unattend import DEFAULTS
+from .unattend import DEFAULTS, SECRET_KEYS
 
 VERSION = 1
-SETUP_KEYS = [k for k in DEFAULTS if k != "password"]
+SETUP_KEYS = [k for k in DEFAULTS if k not in SECRET_KEYS]
 
 
 def filename(name):
@@ -18,19 +18,21 @@ def filename(name):
     return f"{stem or 'profile'}.json"
 
 
-def to_profile(name, settings, patch_ids):
+def to_profile(name, settings, patch_ids, secrets=False):
+    """`secrets` also writes the filled-in passwords, in plain text."""
     name = name.strip()
     if not name:
         raise ValueError("A profile needs a name.")
+    keys = SETUP_KEYS + [k for k in SECRET_KEYS if secrets and settings.get(k)]
     return {"name": name, "version": VERSION,
             "patches": [p for p in patch_ids if p in PATCHES],
-            "setup": {k: settings[k] for k in SETUP_KEYS if k in settings}}
+            "setup": {k: settings[k] for k in keys if k in settings}}
 
 
 def from_profile(data):
     """Returns (setup answers, patch ids); unknown keys, wrong types and unknown patches are dropped."""
     setup = {k: v for k, v in data.get("setup", {}).items()
-             if k in SETUP_KEYS and type(v) is type(DEFAULTS[k])}
+             if k in DEFAULTS and type(v) is type(DEFAULTS[k])}
     return setup, resolve(data.get("patches", []))
 
 
