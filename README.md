@@ -87,7 +87,7 @@ Not yet: downloading Windows.
 - The Wi-Fi password is stored in plain text in `winsmith-wifi.ps1` on the ISO. The script deletes itself after the
   first sign-in; if that fails (for example a non-admin first user) it says so in `winsmith.log`.
 - Profiles keep passwords only if you say Yes, and then in plain text. Share exported profiles with care.
-- Winsmith's own settings (`config.json`) never contain passwords.
+- Winsmith's own settings (`config.json`) hold only the ISO path and the time of the last update check, never passwords.
 - Anyone with the ISO can read these, so keep it private.
 - `Winsmith.exe` is not code-signed, so Windows Defender may warn about it (for example `Bearfoos.A!ml`). That is a
   false positive of its heuristics; you can check the file against the release page or run from source instead.
@@ -111,7 +111,8 @@ python main.py
 ```
 
 Needs Python 3.9+. The GUI uses Qt (PySide6); on some minimal Linux setups Qt also needs `libxcb-cursor0`.
-Settings are kept in `%APPDATA%\Winsmith\config.json` (Linux: `~/.config/Winsmith/config.json`); passwords are never saved there.
+Winsmith starts clean every time. Only your profiles and the base ISO path are remembered: the ISO path (and the last update check) in
+`%APPDATA%\Winsmith\config.json` (Linux: `~/.config/Winsmith/config.json`), profiles in the `profiles` folder next to it.
 
 Build the exe: `python build_exe.py` (Nuitka, writes `dist/Winsmith.exe`). Use Nuitka 4.4 or newer: 4.3 (the latest
 on PyPI) builds an exe that crashes on start with Python 3.14 and PySide6, so build in a venv with a 4.4 release candidate.

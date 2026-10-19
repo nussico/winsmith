@@ -1,5 +1,6 @@
 """Main window: app bar with the step indicator, the four pages, settings and profiles."""
 import json
+import math
 import os
 import sys
 import threading
@@ -10,9 +11,9 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QMessageBox, QStackedWidget, QWidget
 
-from .. import __version__, profiles, updater
+from .. import __version__, iso, profiles, updater
 from ..patches import PATCHES, PRESETS, resolve
-from ..unattend import DEFAULTS, SECRET_KEYS, auto_mode
+from ..unattend import DEFAULTS, auto_mode
 from .pages.build import BuildPage
 from .pages.patches import PatchesPage
 from .pages.setup import SetupPage
@@ -34,7 +35,7 @@ def _config_dir():
 
 CONFIG = _config_dir() / "config.json"
 OLD_CONFIG = Path(__file__).resolve().parent.parent.parent / "config.json"  # where versions before 0.2 kept it
-# never written to config.json
+# only "iso" and "last_update_check" are written to config.json; every other setting starts at these defaults
 UI_DEFAULTS = {**DEFAULTS, "unattended": False, "user": "User"}  # fresh install: Setup asks as usual; "User" is ready when switched on
 DEFAULT_PRESET = "Basic"
 PAGES = ["Source", "Patches", "Setup", "Build"]
@@ -60,14 +61,17 @@ class MainWindow(QWidget):
         self.ready = False
         self.current = None
         self.profile_dir = CONFIG.parent / "profiles"
-        cfg = self._load_config()
-        self.s = {k: type(d)(cfg.get(k, d)) for k, d in {**UI_DEFAULTS, "iso": "", "output": ""}.items()}
-        for k in SECRET_KEYS:
-            self.s[k] = ""
-        self.patches = set(resolve(cfg.get("patches", PRESETS[DEFAULT_PRESET])))
+        cfg = self._load_config()  # only the base ISO is remembered; everything else starts clean
+        self.s = {**UI_DEFAULTS, "apps": [], "iso": str(cfg.get("iso", "") or ""), "output": ""}
+        self.patches = set(resolve(PRESETS[DEFAULT_PRESET]))
         self.updating = False
         self._update_exe = None
-        self.last_update_check = float(cfg.get("last_update_check", 0) or 0)
+        try:
+            self.last_update_check = float(cfg.get("last_update_check", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            self.last_update_check = 0.0
+        if not math.isfinite(self.last_update_check):
+            self.last_update_check = 0.0
         self.upd = UpdateSignals()
         self.upd.found.connect(self._show_update)
         self.upd.progress.connect(lambda f: self.banner.busy(f"Downloading update… {int(f * 100)}%"))
@@ -106,6 +110,8 @@ class MainWindow(QWidget):
         self.pages["Source"].refresh()
         self.pages["Patches"].refresh()
         self.pages["Setup"].refresh()
+        if self.s["iso"]:
+            self.pages["Build"].set_output(iso.default_output(self.s["iso"]))
 
         QShortcut(QKeySequence("Ctrl+Tab"), self, lambda: self._step(1))
         for seq in ("Ctrl+Shift+Tab", "Ctrl+Shift+Backtab"):
@@ -265,15 +271,15 @@ class MainWindow(QWidget):
     def _load_config(self):
         for path in (CONFIG, OLD_CONFIG):
             try:
-                return json.loads(path.read_text(encoding="utf-8"))
+                data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                pass
+                continue
+            if isinstance(data, dict):
+                return data
         return {}
 
     def save_config(self):
-        data = {k: v for k, v in self.s.items() if k not in SECRET_KEYS}
-        data["patches"] = self.selected()
-        data["last_update_check"] = self.last_update_check
+        data = {"iso": self.s["iso"], "last_update_check": self.last_update_check}
         try:
             CONFIG.parent.mkdir(parents=True, exist_ok=True)
             CONFIG.write_text(json.dumps(data, indent=2), encoding="utf-8")
