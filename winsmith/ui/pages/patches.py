@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QMenu, QMessageBox, QWi
 
 from ... import profiles
 from ...patches import PATCHES, PRESETS
+from ...unattend import SECRET_KEYS
 from ..page import NARROW, Page
 from ..widgets import ChoiceCard, ResponsiveGrid, Section, ToggleRow, button, hbox, label, set_prop, vbox
 
@@ -166,17 +167,27 @@ class PatchesPage(Page):
 
     def save_dialog(self):
         name, ok = QInputDialog.getText(self, "Save profile",
-                                        "Name for this profile (saves the patches and the Setup answers,\n"
-                                        "never the password):", text=self.current() or "")
+                                        "Name for this profile (saves the patches and the Setup answers;\n"
+                                        "passwords only if you choose to):", text=self.current() or "")
         if ok and name.strip():
             self.save(name)
+
+    def _ask_secrets(self):
+        """Yes if the filled-in passwords should go into the profile file. Asks only when there are any."""
+        if not any(self.win.s.get(k) for k in SECRET_KEYS):
+            return False
+        return QMessageBox.question(
+            self, "Winsmith", "Save the passwords in this profile too?\n\n"
+            "They are stored in plain text in the profile file, and anyone with the file can read them. "
+            "Choose No to save everything except the passwords.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No) == QMessageBox.Yes
 
     def save(self, name):
         name = name.strip()
         if name in PRESETS:
             QMessageBox.warning(self, "Winsmith", f'"{name}" is a built-in preset. Pick another name.')
             return
-        profiles.save_profile(self.win.profile_dir, self.win.current_profile(name))
+        profiles.save_profile(self.win.profile_dir, self.win.current_profile(name, self._ask_secrets()))
         self.reload_profiles()
 
     def import_dialog(self):
@@ -204,7 +215,7 @@ class PatchesPage(Page):
         if path:
             if not path.lower().endswith(".json"):
                 path += ".json"
-            profiles.save_profile(None, self.win.current_profile(name), path)
+            profiles.save_profile(None, self.win.current_profile(name, self._ask_secrets()), path)
 
     def delete(self, name):
         if QMessageBox.question(self, "Winsmith", f'Delete the profile "{name}"?') == QMessageBox.Yes:

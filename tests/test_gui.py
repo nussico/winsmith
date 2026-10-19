@@ -284,6 +284,67 @@ class GuiTests(unittest.TestCase):
         self.assertIn("disk full", self.w.banner.text.text())
         self.assertFalse(self.w.banner.update_btn.isHidden())
 
+    def test_apps_add_remove_and_profile_roundtrip(self):
+        page = self.w.pages["Setup"]
+        page.search_edit.setText("bad id")
+        page._add_typed()
+        self.assertEqual(self.w.s["apps"], [])
+        self.assertFalse(page.f_apps.error.isHidden())
+        page.search_edit.setText("Mozilla.Firefox")
+        page._add_typed()
+        page._add("Mozilla.Firefox")  # no duplicates
+        page.search_edit.setText("fire")
+        page._show_results([{"name": "7-Zip", "id": "7zip.7zip", "version": "1"}], None)
+        self.assertEqual(page.results_box.count(), 1)
+        page._pick("7zip.7zip")
+        self.assertEqual(page.search_edit.text(), "")
+        self.assertEqual(page.results_box.count(), 0)
+        page._remove("7zip.7zip")
+        self.assertEqual(self.w.s["apps"], ["Mozilla.Firefox"])
+        prof = self.w.current_profile("p")
+        self.assertEqual(prof["setup"]["apps"], ["Mozilla.Firefox"])
+        page._remove("Mozilla.Firefox")
+        self.assertEqual(self.w.s["apps"], [])
+        self.w.apply_profile(prof)
+        self.assertEqual(self.w.s["apps"], ["Mozilla.Firefox"])
+        self.assertEqual(page.chosen_box.count(), 1)
+
+    def test_save_profile_asks_before_keeping_passwords(self):
+        from PySide6.QtWidgets import QMessageBox
+        from winsmith import profiles
+        page = self.w.pages["Patches"]
+        name = "pwtest"
+        path = self.w.profile_dir / profiles.filename(name)
+        with mock.patch.object(QMessageBox, "question") as q:
+            page.save(name)  # no passwords filled in: no question
+            q.assert_not_called()
+            self.assertNotIn("wifi_password", json.loads(path.read_text())["setup"])
+            self.w.s["wifi_password"] = "longenough1"
+            self.w.s["password"] = "pw"
+            q.return_value = QMessageBox.No
+            page.save(name)
+            self.assertEqual(q.call_count, 1)
+            self.assertNotIn("wifi_password", json.loads(path.read_text())["setup"])
+            q.return_value = QMessageBox.Yes
+            page.save(name)
+            setup = json.loads(path.read_text())["setup"]
+            self.assertEqual((setup["wifi_password"], setup["password"]), ("longenough1", "pw"))
+        self.w.s["wifi_password"] = self.w.s["password"] = ""
+        self.w.apply_profile(json.loads(path.read_text()))
+        self.assertEqual(self.w.s["wifi_password"], "longenough1")
+        self.assertEqual(self.w.pages["Setup"].f_pass.input.text(), "pw")
+
+    def test_wifi_validation_and_profile_excludes_password(self):
+        page = self.w.pages["Setup"]
+        page.f_ssid.input.setText("Home")
+        page.f_wpass.input.setText("short")
+        self.assertIsNotNone(page.validate())
+        page.f_wpass.input.setText("longenough1")
+        self.assertIsNone(page.validate())
+        prof = self.w.current_profile("p")
+        self.assertEqual(prof["setup"]["wifi_ssid"], "Home")
+        self.assertNotIn("wifi_password", prof["setup"])
+
     def test_import_old_profile_maps_ids(self):
         path = Path(self.tmp.name) / "old.json"
         path.write_text(json.dumps({"name": "Old", "patches": ["telemetry", "adscopilot", "notaskview"]}),

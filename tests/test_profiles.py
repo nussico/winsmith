@@ -36,7 +36,14 @@ class ProfileTests(unittest.TestCase):
                 "setup": {"user": "bob", "password": "pw", "evil": 1, "admin": "yes"}}
         setup, ids = profiles.from_profile(data)
         self.assertEqual(ids, ["tracking"])
-        self.assertEqual(setup, {"user": "bob"})  # wrong type for admin is ignored too
+        self.assertEqual(setup, {"user": "bob", "password": "pw"})  # wrong type for admin is ignored too
+
+    def test_passwords_only_saved_when_asked(self):
+        s = {"user": "bob", "password": "pw", "wifi_password": "", "wifi_ssid": "Home"}
+        self.assertNotIn("password", profiles.to_profile("p", s, [])["setup"])
+        kept = profiles.to_profile("p", s, [], secrets=True)["setup"]
+        self.assertEqual(kept["password"], "pw")
+        self.assertNotIn("wifi_password", kept)  # empty ones are left out
 
     def test_bad_files(self):
         bad = self.dir / "bad.json"

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QStackedWidget, QWidget
 
 from .. import __version__, profiles, updater
 from ..patches import PATCHES, PRESETS, resolve
-from ..unattend import DEFAULTS, auto_mode
+from ..unattend import DEFAULTS, SECRET_KEYS, auto_mode
 from .pages.build import BuildPage
 from .pages.patches import PatchesPage
 from .pages.setup import SetupPage
@@ -34,7 +34,7 @@ def _config_dir():
 
 CONFIG = _config_dir() / "config.json"
 OLD_CONFIG = Path(__file__).resolve().parent.parent.parent / "config.json"  # where versions before 0.2 kept it
-SECRET_KEYS = {"password"}  # never written to config.json
+# never written to config.json
 UI_DEFAULTS = {**DEFAULTS, "unattended": False, "user": "User"}  # fresh install: Setup asks as usual; "User" is ready when switched on
 DEFAULT_PRESET = "Basic"
 PAGES = ["Source", "Patches", "Setup", "Build"]
@@ -62,7 +62,8 @@ class MainWindow(QWidget):
         self.profile_dir = CONFIG.parent / "profiles"
         cfg = self._load_config()
         self.s = {k: type(d)(cfg.get(k, d)) for k, d in {**UI_DEFAULTS, "iso": "", "output": ""}.items()}
-        self.s["password"] = ""
+        for k in SECRET_KEYS:
+            self.s[k] = ""
         self.patches = set(resolve(cfg.get("patches", PRESETS[DEFAULT_PRESET])))
         self.updating = False
         self._update_exe = None
@@ -238,8 +239,8 @@ class MainWindow(QWidget):
     def settings(self):
         return {k: v for k, v in self.s.items() if k not in ("iso", "output")}
 
-    def current_profile(self, name):
-        return profiles.to_profile(name, self.s, self.selected())
+    def current_profile(self, name, secrets=False):
+        return profiles.to_profile(name, self.s, self.selected(), secrets)
 
     def apply_profile(self, prof):
         setup, ids = profiles.from_profile(prof)

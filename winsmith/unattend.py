@@ -9,6 +9,9 @@ from .patches import PATCHES, PROTECTED_APPS
 SCRIPTS_DIR = r"C:\Windows\Setup\Scripts"
 SCRIPT_NAME = "winsmith.ps1"
 USER_SCRIPT = "winsmith-user.ps1"
+APPS_SCRIPT = "winsmith-apps.ps1"
+WIFI_SCRIPT = "winsmith-wifi.ps1"
+SECRET_KEYS = ("password", "wifi_password")  # never saved to settings or profiles
 
 # Generic install keys: they only pick the edition, they do not activate.
 GENERIC_KEYS = {
@@ -24,6 +27,8 @@ DEFAULTS = {
     "language": "en-US", "keyboard": "en-US", "timezone": "W. Europe Standard Time",
     "edition": "",  # "" = ask during setup
     "auto_install": "off",  # off | best_ssd | disk0: install without asking which disk (wipes it)
+    "wifi_ssid": "", "wifi_password": "", "wifi_security": "WPA2", "wifi_hidden": False,
+    "apps": [],  # winget package IDs, installed after the first sign-in
 }
 AUTO_INSTALL = ("off", "best_ssd", "disk0")
 AUTO_SCRIPT = "autoinstall.js"
@@ -60,6 +65,50 @@ def account_error(user, computer="", admin=True, skip_oobe=False):
     if n and not admin and skip_oobe:
         return "With the setup screens skipped this would be the only account, so it must be an administrator."
     return None
+
+
+APP_ID = re.compile(r"[A-Za-z0-9][\w+-]*(\.[\w+-]+)+")
+
+
+def app_id_ok(app):
+    """A winget package ID like Mozilla.Firefox. Anything else could break out of the script."""
+    return isinstance(app, str) and APP_ID.fullmatch(app) is not None
+
+
+def valid_apps(cfg):
+    """The apps to install: valid IDs only, no duplicates, in the order given."""
+    seen = []
+    for a in {**DEFAULTS, **cfg}["apps"]:
+        if app_id_ok(a) and a not in seen:
+            seen.append(a)
+    return seen
+
+
+WIFI_SECURITY = {"WPA2": ("WPA2PSK", "WPA2-Personal"), "WPA3": ("WPA3SAE", "WPA3-Personal"), "open": ("open", "Open")}
+
+
+def wifi_error(ssid, password, security="WPA2"):
+    """Returns a problem with the Wi-Fi settings, or None. An empty name means no Wi-Fi."""
+    ssid = ssid.strip()
+    if not ssid:
+        return None
+    bad = r"[\x00-\x1f\x7f-\x9f  ]"
+    if len(ssid.encode("utf-8")) > 32 or re.search(bad, ssid):
+        return "Network name can have at most 32 bytes and no control characters."
+    if security not in WIFI_SECURITY:
+        return "Choose the Wi-Fi security type."
+    if security == "open":
+        return None
+    hex_key = security == "WPA2" and re.fullmatch(r"[0-9A-Fa-f]{64}", password)  # WPA3 takes no raw key
+    if not (8 <= len(password) <= 63 or hex_key) or re.search(bad, password):
+        return "Wi-Fi password needs 8 to 63 characters."
+    return None
+
+
+def wifi_on(cfg):
+    u = {**DEFAULTS, **cfg}
+    return (bool(u["wifi_ssid"].strip()) and u["wifi_security"] in WIFI_SECURITY
+            and wifi_error(u["wifi_ssid"], u["wifi_password"], u["wifi_security"]) is None)
 
 
 def auto_mode(cfg):
@@ -108,6 +157,7 @@ def _commands(tag, field, cmds):
 
 def make_unattend(cfg, patch_ids):
     u = {**DEFAULTS, **cfg}
+    wifi = wifi_on(u)  # judged before stripping, exactly as iso.build does
     u = {k: v.strip() if isinstance(v, str) else v for k, v in u.items()}
     on = u["unattended"]
     lang = escape(u["language"])
@@ -140,10 +190,15 @@ def make_unattend(cfg, patch_ids):
 
     # specialize: runs as SYSTEM before any user exists, so DEFAULT-profile tweaks reach every user.
     spec = _comp("Microsoft-Windows-Shell-Setup", f"<ComputerName>{escape(u['computer']) or '*'}</ComputerName>") if on else ""
+    ps = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {SCRIPTS_DIR}"
+    spec_cmds = []
     if patch_ids:
-        run = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {SCRIPTS_DIR}\\{SCRIPT_NAME}"
+        spec_cmds.append(rf"{ps}\{SCRIPT_NAME}")
+    if wifi:  # the network is up before the first sign-in, so apps and updates can use it
+        spec_cmds.append(rf"{ps}\{WIFI_SCRIPT}")
+    if spec_cmds:
         spec += _comp("Microsoft-Windows-Deployment",
-                      "<RunSynchronous>" + _commands("RunSynchronousCommand", "Path", [run]) + "</RunSynchronous>")
+                      "<RunSynchronous>" + _commands("RunSynchronousCommand", "Path", spec_cmds) + "</RunSynchronous>")
 
     # oobeSystem
     shell = ""
@@ -164,6 +219,14 @@ def make_unattend(cfg, patch_ids):
                   f"<Group>{group}</Group><Password>{pw}</Password></LocalAccount></LocalAccounts></UserAccounts>")
     if on and u["timezone"]:
         shell += f"<TimeZone>{escape(u['timezone'])}</TimeZone>"
+    logon = []
+    if wifi:  # again at the first sign-in (the Wi-Fi service may not have been ready earlier); -Final cleans up
+        logon.append(rf"{ps}\{WIFI_SCRIPT} -Final")
+    if valid_apps(u):
+        # Async, so the desktop does not wait for the downloads. Runs once, at the first sign-in.
+        logon.append(rf'cmd /c start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -File {SCRIPTS_DIR}\{APPS_SCRIPT}')
+    if logon:
+        shell += "<FirstLogonCommands>" + _commands("SynchronousCommand", "CommandLine", logon) + "</FirstLogonCommands>"
 
     pe_intl = _comp("Microsoft-Windows-International-Core-WinPE",
                     f"<SetupUILanguage><UILanguage>{lang}</UILanguage></SetupUILanguage>{intl}") if on else ""
@@ -248,5 +311,71 @@ def make_patch_script(patch_ids):
         "[gc]::Collect()",
         r"reg.exe unload HKU\WS_DEFAULT | Out-Null",
         "Log 'done'",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def make_apps_script(apps):
+    """PowerShell run at the first sign-in: waits for winget and the network, then installs each app."""
+    lines = [
+        "$ProgressPreference = 'SilentlyContinue'",
+        rf"$log = '{SCRIPTS_DIR}\winsmith-apps.log'",
+        "function Log($m) { Add-Content $log ('[{0:HH:mm:ss}] {1}' -f (Get-Date), $m) }",
+        "Log 'Winsmith apps started'",
+        "$deadline = (Get-Date).AddMinutes(15)",
+        "# App Installer registers winget a little after the first sign-in",
+        "$winget = $null",
+        "while (-not $winget -and (Get-Date) -lt $deadline) {",
+        "    $c = Get-Command winget.exe -ErrorAction SilentlyContinue",
+        r'    if ($c) { $winget = $c.Source } elseif (Test-Path "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe") {',
+        r'        $winget = "$env:LOCALAPPDATA\Microsoft\WindowsApps\winget.exe" } else { Start-Sleep 10 }',
+        "}",
+        "if (-not $winget) { Log 'winget not found, giving up'; exit 1 }",
+        "while (-not (Test-NetConnection cdn.winget.microsoft.com -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue) -and (Get-Date) -lt $deadline) {",
+        "    Log 'waiting for the network'; Start-Sleep 15",
+        "}",
+        "& $winget source update --disable-interactivity | Out-Null",
+        f"foreach ($id in @({', '.join(ps_quote(a) for a in apps)})) {{",
+        '    Log "install $id"',
+        "    & $winget install --id $id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null",
+        '    Log "  exit code $LASTEXITCODE"',
+        "}",
+        "Log 'done'",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def make_wifi_script(cfg):
+    """PowerShell that adds the Wi-Fi profile for all users. -Final (first sign-in) also deletes the password."""
+    u = {**DEFAULTS, **cfg}
+    ssid, pw = escape(u["wifi_ssid"].strip()), escape(u["wifi_password"])
+    auth = WIFI_SECURITY[u["wifi_security"]][0]
+    enc = "none" if auth == "open" else "AES"
+    key = "" if auth == "open" else (f"<sharedKey><keyType>passphrase</keyType><protected>false</protected>"
+                                     f"<keyMaterial>{pw}</keyMaterial></sharedKey>")
+    xml = ('<?xml version="1.0"?><WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">'
+           f"<name>{ssid}</name><SSIDConfig><SSID><name>{ssid}</name></SSID>"
+           f"<nonBroadcast>{'true' if u['wifi_hidden'] else 'false'}</nonBroadcast></SSIDConfig>"
+           "<connectionType>ESS</connectionType><connectionMode>auto</connectionMode><MSM><security><authEncryption>"
+           f"<authentication>{auth}</authentication><encryption>{enc}</encryption><useOneX>false</useOneX>"
+           f"</authEncryption>{key}</security></MSM></WLANProfile>")
+    b64 = base64.b64encode(xml.encode("utf-8")).decode()  # no quoting problems whatever the name or password holds
+    lines = [
+        "param([switch]$Final)",
+        rf"$log = '{SCRIPTS_DIR}\winsmith.log'",
+        "function Log($m) { Add-Content $log ('[{0:HH:mm:ss}] {1}' -f (Get-Date), $m) }",
+        "$f = Join-Path $env:TEMP 'winsmith-wifi.xml'",
+        "try {",
+        "    Start-Service WlanSvc -ErrorAction SilentlyContinue",
+        f"    $x = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{b64}'))",
+        "    Set-Content -LiteralPath $f -Encoding UTF8 -Value $x",
+        "    $o = & netsh.exe wlan add profile filename=$f user=all 2>&1",
+        "    Log \"wifi profile: $o\"",
+        "} catch { Log \"wifi failed: $_\" }",
+        "Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue",
+        "if ($Final) {",
+        "    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue",
+        "    if (Test-Path -LiteralPath $PSCommandPath) { Log 'could not delete this script; it holds the Wi-Fi password, delete it by hand' }",
+        "}",
     ]
     return "\r\n".join(lines) + "\r\n"

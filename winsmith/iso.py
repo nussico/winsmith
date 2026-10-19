@@ -4,18 +4,38 @@ Windows: built-in Mount-DiskImage to read, oscdimg (Windows ADK) to write.
 Linux:   7z to read (it understands the UDF part Windows ISOs keep their files in), xorriso to write.
 """
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import date
 from pathlib import Path
 
-from .unattend import AUTO_SCRIPT, SCRIPT_NAME, auto_mode, make_patch_script, make_unattend, ps_quote
+from . import __version__
+from .unattend import (APPS_SCRIPT, AUTO_SCRIPT, SCRIPT_NAME, WIFI_SCRIPT, auto_mode, make_apps_script,
+                       make_patch_script, make_unattend, make_wifi_script, ps_quote, valid_apps, wifi_on)
 
 IS_WINDOWS = sys.platform == "win32"
-LABEL = "WINSMITH"
+AUTO_NAME = re.compile(r"Winsmith_.+_v\d+(\.\d+)*_\d{4}-\d{2}-\d{2}\.iso", re.IGNORECASE)
+
+
+def output_name(source_iso):
+    """Default name for the new ISO: the source name, Winsmith version and today's date."""
+    return f"Winsmith_{Path(source_iso).stem}_v{__version__}_{date.today():%Y-%m-%d}.iso"
+
+
+def is_auto_name(path):
+    """True for a name output_name() made (or the plain Winsmith_<source>.iso of older versions)."""
+    n = Path(path).name
+    return bool(AUTO_NAME.fullmatch(n)) or n.lower().startswith("winsmith_") and n.lower().endswith(".iso")         and not re.search(r"_v\d", n)
+
+
+def volume_label():
+    """Volume label of the new ISO, e.g. WINSMITH_0_2_4_20261019 (32 characters at most)."""
+    return f"WINSMITH_{__version__.replace('.', '_')}_{date.today():%Y%m%d}"[:32]
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
 AUTO_JS = Path(__file__).with_name(AUTO_SCRIPT)
 
@@ -175,10 +195,10 @@ def pack(src, out, log, cancel=None):
     if Path(out).exists():
         Path(out).unlink()
     if IS_WINDOWS:
-        _run([_find_oscdimg(), "-m", "-o", "-u2", "-udfver102", f"-l{LABEL}",
+        _run([_find_oscdimg(), "-m", "-o", "-u2", "-udfver102", f"-l{volume_label()}",
               f"-bootdata:2#p0,e,b{bios}#pEF,e,b{uefi}", src, out], log, cancel)
     else:
-        _run(["xorriso", "-as", "mkisofs", "-iso-level", "3", "-J", "-joliet-long", "-V", LABEL,
+        _run(["xorriso", "-as", "mkisofs", "-iso-level", "3", "-J", "-joliet-long", "-V", volume_label(),
               "-b", bios.relative_to(src).as_posix(), "-no-emul-boot", "-boot-load-size", "8", "-hide", "boot.catalog",
               "-eltorito-alt-boot", "-e", uefi.relative_to(src).as_posix(), "-no-emul-boot",
               "-o", out, src], log, cancel)
@@ -208,12 +228,21 @@ def build(iso, out, settings, patch_ids, log, step=None, cancel=None):
         step(2, 3, "Adding your settings")
         log("Adding autounattend.xml")
         (work / "autounattend.xml").write_text(make_unattend(settings, patch_ids), encoding="utf-8")
-        if patch_ids:
+        apps = valid_apps(settings)
+        wifi = wifi_on(settings)
+        if patch_ids or apps or wifi:
             # Windows Setup copies sources\$OEM$\$$ to C:\Windows.
             scripts = sources / "$OEM$" / "$$" / "Setup" / "Scripts"
             scripts.mkdir(parents=True, exist_ok=True)
+        if patch_ids:
             (scripts / SCRIPT_NAME).write_text(make_patch_script(patch_ids), encoding="utf-8-sig")
             log(f"Added {len(patch_ids)} patches (log on the installed PC: C:\\Windows\\Setup\\Scripts\\winsmith.log)")
+        if wifi:
+            (scripts / WIFI_SCRIPT).write_text(make_wifi_script(settings), encoding="utf-8-sig")
+            log(f"Added Wi-Fi network \"{settings['wifi_ssid'].strip()}\" (the password is stored in plain text on the ISO)")
+        if apps:
+            (scripts / APPS_SCRIPT).write_text(make_apps_script(apps), encoding="utf-8-sig")
+            log(f"Added {len(apps)} apps (log on the installed PC: C:\\Windows\\Setup\\Scripts\\winsmith-apps.log)")
         if auto_mode(settings) == "best_ssd":
             shutil.copyfile(AUTO_JS, sources / AUTO_SCRIPT)
             log("Added the Best SSD automatic install")

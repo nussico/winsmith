@@ -4,6 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFileDialog, QFrame, QLineEdit
 
+from ... import iso
 from ..page import Page
 from ..widgets import DiscIcon, DropZone, Field, button, hbox, label, vbox
 
@@ -59,8 +60,9 @@ class SourcePage(Page):
 
     def set_path(self, p):
         self.path.setText(str(Path(p)))
-        if not self.win.s["output"]:
-            self.win.pages["Build"].set_output(str(Path(p).with_name(f"Winsmith_{Path(p).stem}.iso")))
+        out = self.win.s["output"]
+        if not out or iso.is_auto_name(out):  # keep a name the user typed
+            self.win.pages["Build"].set_output(str(Path(p).with_name(iso.output_name(p))))
 
     def browse(self):
         start = str(Path(self.win.s["iso"]).parent) if self.win.s["iso"] else ""
