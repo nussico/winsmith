@@ -2,6 +2,8 @@
 
 Build your own Windows 11 ISO on **Windows or Linux**: pick an ISO, tick tweaks, answer setup in advance.
 
+[GitHub](https://github.com/nussico/winsmith) · [Releases](https://github.com/nussico/winsmith/releases/latest) · MIT licensed
+
 Your ISO's Windows image is not modified. Winsmith adds an `autounattend.xml` and a patch script;
 the patches run once while Windows installs (log on the installed PC: `C:\Windows\Setup\Scripts\winsmith.log`).
 No admin rights needed, a build takes about a minute.
@@ -57,7 +59,7 @@ and shows the error if it fails. oscdimg is also found in x86 and ARM64 ADK inst
 - **Apps**: search winget (or type an ID like `Mozilla.Firefox`) and the apps install after the first sign-in.
   The PC needs internet then; progress is in `C:\Windows\Setup\Scripts\winsmith-apps.log`. Searching needs winget
   on the PC running Winsmith, otherwise type the ID.
-- **Wi-Fi**: the PC joins your network on its own (WPA2, WPA3 or open, hidden networks too). Leave the name empty to skip.
+- **Wi-Fi**: the PC joins your network on its own (WPA2, WPA3 or open, hidden networks too). Switch it on in Setup and enter the name.
 - **ISO name**: the file name and the disc label carry the date and Winsmith version, e.g. `Winsmith_Win11_v0.2.5_2026-10-19.iso`.
 - **Profiles**: save your patches and Setup answers as a profile, export it as `.json` and import it on another PC.
   Passwords are left out unless you answer Yes when asked.
@@ -122,3 +124,8 @@ on PyPI) builds an exe that crashes on start with Python 3.14 and PySide6, so bu
 ```
 python -m unittest
 ```
+
+## Copyright
+
+Copyright (c) 2026 [nussico](https://github.com/nussico). Winsmith is open source under the [MIT License](LICENSE).
+Source code: <https://github.com/nussico/winsmith>

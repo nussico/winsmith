@@ -8,7 +8,11 @@ dynamic = ["version"]
 description = "Build your own Windows 11 ISO on Windows or Linux: patches and unattended setup."
 readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "MIT"}
 dependencies = ["PySide6-Essentials>=6.5"]
+
+[project.urls]
+Homepage = "https://github.com/nussico/winsmith"
 
 [project.gui-scripts]
 winsmith = "winsmith.__main__:run"
