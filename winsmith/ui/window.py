@@ -64,6 +64,8 @@ class MainWindow(QWidget):
         self.s = {k: type(d)(cfg.get(k, d)) for k, d in {**UI_DEFAULTS, "iso": "", "output": ""}.items()}
         self.s["password"] = ""
         self.patches = set(resolve(cfg.get("patches", PRESETS[DEFAULT_PRESET])))
+        self.updating = False
+        self._update_exe = None
         self.last_update_check = float(cfg.get("last_update_check", 0) or 0)
         self.upd = UpdateSignals()
         self.upd.found.connect(self._show_update)
@@ -112,15 +114,17 @@ class MainWindow(QWidget):
         self.show_page("Source")
 
     # ---------- updates ----------
-    def check_for_updates(self, force=False):
+    def check_for_updates(self):
         """Looks for a newer release in the background, at most once a day."""
-        if not force and not updater.due(self.last_update_check):
+        if not updater.due(self.last_update_check):
             return
-        self.last_update_check = time.time()
 
         def work():
-            rel = updater.check(__version__)
-            if rel:
+            rel = updater.latest_release()
+            if rel is None:  # offline or rate limited: try again next start
+                return
+            self.last_update_check = time.time()
+            if updater.is_newer(rel["version"], __version__):
                 self.upd.found.emit(rel)
 
         threading.Thread(target=work, daemon=True).start()
@@ -130,33 +134,59 @@ class MainWindow(QWidget):
 
     def start_update(self, rel):
         build = self.pages["Build"]
-        if build.building or build.installing:
-            self.banner.set_text("Finish the current build or install first, then update.")
+        if build.installing:
+            self.banner.show_release(rel, True)
+            self.banner.set_text("Finish the current install first, then update.")
             return
         exe = updater.exe_path()
         if exe is None or not rel or not rel.get("asset_url"):
             return
+        self.updating = True
         self.banner.busy("Downloading update… 0%")
 
         def work():
             new = exe.with_name(exe.stem + ".new" + exe.suffix)
             try:
-                updater.download(rel["asset_url"], new, rel["size"], self.upd.progress.emit)
+                updater.download(rel["asset_url"], new, rel["size"], self.upd.progress.emit, rel.get("sha256", ""))
                 updater.apply(new, exe)
-                updater.relaunch(exe)
-                self.upd.done.emit(None)
             except Exception as e:  # show any failure in the banner, keep the current version running
-                new.unlink(missing_ok=True)
+                try:
+                    new.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 self.upd.done.emit(str(e) or type(e).__name__)
+                return
+            self.upd.done.emit(None)
 
+        self._update_exe = exe
         threading.Thread(target=work, daemon=True).start()
 
     def _update_done(self, err):
         if err:
+            self.updating = False
             self.banner.show_release(self.banner.rel, True)
             self.banner.set_text(f"Update failed: {err}")
             return
+        self.updating = False
+        # The new exe is in place. Stop a running build cleanly (like closeEvent), then restart.
         self.save_config()
+        build = self.pages["Build"]
+        if build.building:
+            build.cancel.set()
+            self.hide()
+        self._restart_when_stopped()
+
+    def _restart_when_stopped(self):
+        job = self.pages["Build"].job
+        if job is not None and job.is_alive():
+            QTimer.singleShot(200, self._restart_when_stopped)
+            return
+        try:
+            updater.relaunch(self._update_exe)
+        except OSError as e:
+            self.show()
+            self.banner.busy(f"Updated, but Winsmith could not restart ({e}). Start it again by hand.")
+            return
         QApplication.quit()
 
     # ---------- navigation ----------
@@ -250,6 +280,9 @@ class MainWindow(QWidget):
             pass
 
     def closeEvent(self, e):
+        if self.updating:
+            e.ignore()  # downloading: closing now would leave a half-swapped exe
+            return
         build = self.pages["Build"]
         if build.building:
             if QMessageBox.question(self, "Winsmith", "A build is running. Stop it and quit?") != QMessageBox.Yes:

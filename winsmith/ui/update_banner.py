@@ -24,11 +24,12 @@ class UpdateBanner(QFrame):
 
     def show_release(self, rel, can_self_update):
         self.rel = rel
-        self.update_btn.setVisible(can_self_update and bool(rel.get("asset_url")))
-        self.copy_btn.setVisible(not can_self_update)
+        direct = can_self_update and bool(rel.get("asset_url"))  # else fall back to the install command
+        self.update_btn.setVisible(direct)
+        self.copy_btn.setVisible(not direct)
         self.later_btn.setVisible(True)
         self.set_text(f"Winsmith {rel['version']} is available."
-                      + ("" if can_self_update else f" Update with: {self.command}"))
+                      + ("" if direct else f" Update with: {self.command}"))
         self.update_btn.setEnabled(True)
         self.show()
 

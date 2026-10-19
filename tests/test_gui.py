@@ -247,22 +247,22 @@ class GuiTests(unittest.TestCase):
 
     def test_check_finds_update_and_stores_time(self):
         self.w.last_update_check = 0
-        with mock.patch.object(self.win.updater, "check", return_value=self.REL),                 mock.patch.object(self.win.updater, "is_frozen", return_value=True),                 mock.patch("threading.Thread", lambda target, daemon=None: mock.Mock(start=target)):
+        with mock.patch.object(self.win.updater, "latest_release", return_value=self.REL),                 mock.patch.object(self.win.updater, "is_frozen", return_value=True),                 mock.patch("threading.Thread", lambda target, daemon=None: mock.Mock(start=target)):
             self.w.check_for_updates()
         self.app.processEvents()
         self.assertFalse(self.w.banner.isHidden())
         self.assertGreater(self.w.last_update_check, 0)
 
-    def test_update_blocked_while_building(self):
+    def test_update_blocked_while_installing(self):
         build = self.w.pages["Build"]
-        build.building = True
+        build.installing = True
         try:
             with mock.patch.object(self.win.updater, "download") as dl:
                 self.w.start_update(self.REL)
         finally:
-            build.building = False  # closing a "building" window in tearDown would ask a question
+            build.installing = False
         dl.assert_not_called()
-        self.assertIn("build", self.w.banner.text.text().lower())
+        self.assertIn("install", self.w.banner.text.text().lower())
 
     def test_update_downloads_swaps_and_restarts(self):
         up = self.win.updater

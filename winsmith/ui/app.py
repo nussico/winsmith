@@ -1,11 +1,12 @@
 """Application start-up."""
 import sys
+import threading
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QApplication
 
-from .. import updater
+from .. import __version__, updater
 from . import theme
 from .window import MainWindow
 
@@ -47,7 +48,12 @@ def main():
     theme.apply(app)
     exe = updater.exe_path()
     if exe:
-        updater.cleanup_old(exe)  # the exe the last update replaced
+        # The exe the last update replaced, and older versions' unpacked payloads: off the UI thread, as the
+        # previous process may take a moment to let go.
+        def tidy():
+            updater.cleanup_old(exe, wait=15)
+            updater.cleanup_cache(__version__)
+        threading.Thread(target=tidy, daemon=True).start()
     w = MainWindow()
     w.show()
     w.check_for_updates()
