@@ -391,6 +391,31 @@ class GuiTests(unittest.TestCase):
             self.assertFalse(page.scroll.horizontalScrollBar().isVisible(), name)
         self.assertFalse(self.w.brand.isVisible())
 
+    def test_cancel_button_stops_the_build_and_ends_neutral(self):
+        import threading
+        page = self.w.pages["Build"]
+        self.assertTrue(page.cancel_btn.isHidden())
+        page.building, page.cancel = True, threading.Event()
+        page.cancel_btn.show()
+        page.cancel_btn.click()
+        self.assertTrue(page.cancel.is_set())
+        self.assertFalse(page.cancel_btn.isEnabled())
+        page._finish("Build cancelled.")
+        self.assertTrue(page.cancel_btn.isHidden())
+        self.assertEqual(page.status.text(), "Build cancelled")
+        self.assertFalse(page.log_open)
+
+    def test_edition_list_follows_the_iso(self):
+        page = self.w.pages["Setup"]
+        page.set_editions(["Home", "Pro"])
+        self.assertEqual([page.edition.itemText(i) for i in range(page.edition.count())], ["Ask during setup", "Home", "Pro"])
+        self.w.s.update(edition="Education", unattended=True)
+        page.set_editions(["Home", "Pro"])
+        self.assertEqual(self.w.s["edition"], "Education")  # kept, so it can be flagged
+        self.assertIn("no Windows 11 Education", page.validate()[0])
+        page.set_editions(None)
+        self.assertEqual(page.edition.count(), 5)
+
 
 if __name__ == "__main__":
     unittest.main()

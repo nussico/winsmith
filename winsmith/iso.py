@@ -14,9 +14,10 @@ import time
 from datetime import date
 from pathlib import Path
 
-from . import __version__
-from .unattend import (APPS_SCRIPT, AUTO_SCRIPT, SCRIPT_NAME, WIFI_SCRIPT, auto_mode, make_apps_script,
-                       make_patch_script, make_unattend, make_wifi_script, ps_quote, valid_apps, wifi_on)
+from . import __version__, wim
+from .unattend import (APPS_SCRIPT, AUTO_SCRIPT, GENERIC_KEYS, SCRIPT_NAME, WIFI_SCRIPT, auto_mode, custom_files,
+                       custom_name, make_apps_script, make_patch_script, make_unattend, make_wifi_script, ps_quote,
+                       remap_reg, valid_apps, wifi_on)
 
 IS_WINDOWS = sys.platform == "win32"
 AUTO_NAME = re.compile(r"Winsmith_.+_v\d+(\.\d+)*_\d{4}-\d{2}-\d{2}\.iso", re.IGNORECASE)
@@ -119,6 +120,76 @@ def missing_tools():
     return missing
 
 
+def detect_arch(root):
+    """"arm64" for an ARM64 ISO (it boots bootaa64.efi), else "amd64"."""
+    try:
+        _find(root, "efi/boot/bootaa64.efi")
+        return "arm64"
+    except FileNotFoundError:
+        return "amd64"
+
+
+def space_error(iso, out):
+    """A problem when the output drive cannot hold the extracted files plus the new ISO, or None."""
+    try:
+        need = Path(iso).stat().st_size * 2 + 2**30
+        folder = Path(out).resolve().parent
+        while not folder.exists() and folder != folder.parent:
+            folder = folder.parent
+        free = shutil.disk_usage(folder).free
+    except OSError:
+        return None  # cannot tell: let the build try
+    if free < need:
+        return (f"Not enough free space on {folder.anchor or folder}: the build needs about {need / 2**30:.0f} GB, "
+                f"{free / 2**30:.1f} GB are free.")
+    return None
+
+
+def editions_in(names):
+    """Editions Winsmith knows (GENERIC_KEYS) that are among the image names, e.g. ["Home", "Pro"]."""
+    return [e for e in GENERIC_KEYS if f"Windows 11 {e}" in names]
+
+
+def image_names(root):
+    """Image names of the install image in an extracted ISO, or None when unreadable."""
+    try:
+        sources = _find(root, "sources")
+        image = next(f for f in sorted(sources.iterdir())
+                     if f.name.lower() in ("install.wim", "install.esd", "install.swm"))
+        return wim.image_names(image)
+    except (OSError, ValueError, StopIteration):
+        return None
+
+
+def edition_error(edition, names):
+    """A problem when the chosen edition is not in the ISO, or None (also when the names are unknown)."""
+    if not edition or not names or f"Windows 11 {edition}" in names:
+        return None
+    have = ", ".join(editions_in(names)) or ", ".join(names)
+    return f"This ISO has no Windows 11 {edition}. It has: {have}."
+
+
+def read_info(iso_path):
+    """(arch, image names) of an ISO by mounting it read-only. Windows only; (None, None) when it cannot tell."""
+    if not IS_WINDOWS:
+        return None, None
+    q = ps_quote(Path(iso_path).resolve())
+    nolog = lambda m: None  # noqa: E731
+    try:
+        letter = _ps(f"$i = Mount-DiskImage -ImagePath {q} -PassThru; ($i | Get-Volume).DriveLetter", nolog)
+        if len(letter) != 1 or not letter.isalpha():
+            return None, None
+        root = Path(f"{letter}:\\")
+        return detect_arch(root), image_names(root)
+    except (OSError, RuntimeError):
+        return None, None
+    finally:
+        try:
+            _ps(f"Dismount-DiskImage -ImagePath {q} | Out-Null", nolog)
+        except (OSError, RuntimeError):
+            pass
+
+
 def _check(cancel):
     if cancel is not None and cancel.is_set():
         raise Cancelled("Build cancelled.")
@@ -198,18 +269,21 @@ def _find(root, rel):
 
 
 def pack(src, out, log, cancel=None):
-    bios = _find(src, "boot/etfsboot.com")
+    try:
+        bios = _find(src, "boot/etfsboot.com")
+    except FileNotFoundError:
+        bios = None  # ARM64 ISOs boot by UEFI only
     uefi = _find(src, "efi/microsoft/boot/efisys.bin")
     if Path(out).exists():
         Path(out).unlink()
     if IS_WINDOWS:
-        _run([_find_oscdimg(), "-m", "-o", "-u2", "-udfver102", f"-l{volume_label()}",
-              f"-bootdata:2#p0,e,b{bios}#pEF,e,b{uefi}", src, out], log, cancel)
+        boot = f"-bootdata:2#p0,e,b{bios}#pEF,e,b{uefi}" if bios else f"-bootdata:1#pEF,e,b{uefi}"
+        _run([_find_oscdimg(), "-m", "-o", "-u2", "-udfver102", f"-l{volume_label()}", boot, src, out], log, cancel)
     else:
+        bios_args = ["-b", bios.relative_to(src).as_posix(), "-no-emul-boot", "-boot-load-size", "8",
+                     "-hide", "boot.catalog", "-eltorito-alt-boot"] if bios else []
         _run(["xorriso", "-as", "mkisofs", "-iso-level", "3", "-J", "-joliet-long", "-V", volume_label(),
-              "-b", bios.relative_to(src).as_posix(), "-no-emul-boot", "-boot-load-size", "8", "-hide", "boot.catalog",
-              "-eltorito-alt-boot", "-e", uefi.relative_to(src).as_posix(), "-no-emul-boot",
-              "-o", out, src], log, cancel)
+              *bios_args, "-e", uefi.relative_to(src).as_posix(), "-no-emul-boot", "-o", out, src], log, cancel)
 
 
 def build(iso, out, settings, patch_ids, log, step=None, cancel=None):
@@ -222,6 +296,9 @@ def build(iso, out, settings, patch_ids, log, step=None, cancel=None):
     if not Path(iso).is_file():
         raise RuntimeError("Pick a Windows 11 ISO first.")
     out = Path(out).resolve()
+    problem = space_error(iso, out)
+    if problem:
+        raise RuntimeError(problem)
     out.parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="winsmith-", dir=out.parent))
     try:
@@ -233,18 +310,47 @@ def build(iso, out, settings, patch_ids, log, step=None, cancel=None):
         if not any(f.name.lower() in ("install.wim", "install.esd") for f in sources.iterdir()):
             raise RuntimeError("No install.wim/install.esd in this ISO - is it a Windows 11 ISO?")
 
+        arch = detect_arch(work)
+        if arch != "amd64":
+            log(f"Architecture: {arch}")
+        if settings.get("unattended", True):
+            problem = edition_error(settings.get("edition", ""), image_names(work))
+            if problem:
+                raise RuntimeError(problem)
+
         step(2, 3, "Adding your settings")
         log("Adding autounattend.xml")
-        (work / "autounattend.xml").write_text(make_unattend(settings, patch_ids), encoding="utf-8")
+        (work / "autounattend.xml").write_text(make_unattend(settings, patch_ids, arch), encoding="utf-8")
         apps = valid_apps(settings)
         wifi = wifi_on(settings)
-        if patch_ids or apps or wifi:
+        custom = custom_files(settings)
+        drivers = str(settings.get("drivers", "") or "").strip()
+        if patch_ids or apps or wifi or custom:
             # Windows Setup copies sources\$OEM$\$$ to C:\Windows.
             scripts = sources / "$OEM$" / "$$" / "Setup" / "Scripts"
             scripts.mkdir(parents=True, exist_ok=True)
-        if patch_ids:
-            (scripts / SCRIPT_NAME).write_text(make_patch_script(patch_ids), encoding="utf-8-sig")
+        names = []
+        for i, f in enumerate(custom, 1):
+            name = custom_name(i, f)
+            data = Path(f).read_bytes()
+            if name.endswith(".reg"):
+                data = remap_reg(data)
+            else:  # Windows PowerShell reads a script without a BOM as ANSI, so save it as UTF-8 with BOM
+                try:
+                    data = data.decode("utf-8-sig").encode("utf-8-sig")
+                except UnicodeDecodeError:
+                    data = data.decode("cp1252", errors="replace").encode("utf-8-sig")
+            (scripts / name).write_bytes(data)
+            names.append(name)
+        if patch_ids or custom:
+            (scripts / SCRIPT_NAME).write_text(make_patch_script(patch_ids, names), encoding="utf-8-sig")
             log(f"Added {len(patch_ids)} patches (log on the installed PC: C:\\Windows\\Setup\\Scripts\\winsmith.log)")
+        if names:
+            log(f"Added {len(names)} of your own scripts (output: C:\\Windows\\Setup\\Scripts\\winsmith-custom-*.log)")
+        if drivers:
+            shutil.copytree(drivers, work / "$WinpeDriver$", dirs_exist_ok=True)
+            make_writable(work / "$WinpeDriver$")
+            log(f"Added {sum(1 for _ in (work / '$WinpeDriver$').rglob('*.inf'))} driver files")
         if wifi:
             (scripts / WIFI_SCRIPT).write_text(make_wifi_script(settings), encoding="utf-8-sig")
             log(f"Added Wi-Fi network \"{settings['wifi_ssid'].strip()}\" (the password is stored in plain text on the ISO)")

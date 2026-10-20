@@ -2,11 +2,11 @@
 import threading
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import QLineEdit, QWidget
+from PySide6.QtWidgets import QFileDialog, QLineEdit, QWidget
 
 from ... import winget
-from ...unattend import (GENERIC_KEYS, WIFI_SECURITY, account_error, app_id_ok, auto_install_error, region_error,
-                         wifi_error)
+from ...unattend import (CUSTOM_EXT, GENERIC_KEYS, WIFI_SECURITY, account_error, app_id_ok, auto_install_error,
+                         custom_error, drivers_error, region_error, wifi_error)
 from ..page import Page
 from ..widgets import Combo, Divider, Field, ResponsiveGrid, Section, ToggleRow, button, hbox, label, set_prop, vbox
 
@@ -57,6 +57,7 @@ class SetupPage(Page):
                          "Fill in what Windows Setup would ask, so the install runs on its own.")
         self.win = win
         self.loading = False
+        self.editions = None  # editions the ISO holds, when known
         s = win.s
 
         top = Section()
@@ -107,8 +108,9 @@ class SetupPage(Page):
         self.edition = Combo([ASK] + list(GENERIC_KEYS))
         self.edition.setCurrentText(s["edition"] or ASK)
         self.edition.currentTextChanged.connect(lambda t: self._set("edition", "" if t == ASK else t))
-        ed.body.addWidget(Field("Install edition", self.edition,
-                                hint="Uses a generic key that only picks the edition. It does not activate Windows."))
+        self.f_edition = Field("Install edition", self.edition,
+                               hint="Uses a generic key that only picks the edition. It does not activate Windows.")
+        ed.body.addWidget(self.f_edition)
 
         self.inst = Section("Install")
         self.install = Combo(INSTALL_MODES)
@@ -122,6 +124,8 @@ class SetupPage(Page):
             self.body.addWidget(sec)
         self.body.addWidget(self._wifi_section())
         self.body.addWidget(self._apps_section())
+        self.body.addWidget(self._drivers_section())
+        self.body.addWidget(self._custom_section())
 
         self.add_left(button("Back", lambda: win.show_page("Patches"), "ghost"))
         self.add_right(button("Next", lambda: win.show_page("Build"), "primary"))
@@ -155,6 +159,56 @@ class SetupPage(Page):
         self.whidden.toggled.connect(lambda on: self._set("wifi_hidden", on))
         box.addWidget(self.whidden)
         return sec
+
+    # ---------- drivers and your own scripts ----------
+    def _drivers_section(self):
+        sec = Section("Drivers")
+        edit = self._line("drivers")
+        self.f_drivers = Field("Driver folder", edit,
+                               hint="Optional. A folder with .inf drivers, for example Intel RST/VMD so Setup can see "
+                                    "the disk. Loaded during Setup and installed into Windows.")
+        self.f_drivers.row.addWidget(button("Browse…", self._browse_drivers))
+        sec.body.addWidget(self.f_drivers)
+        return sec
+
+    def _browse_drivers(self):
+        p = QFileDialog.getExistingDirectory(self, "Driver folder", self.win.s["drivers"])
+        if p:
+            self.f_drivers.input.setText(str(p))
+
+    def _custom_section(self):
+        sec = Section("Your own scripts")
+        self.f_custom = Field("PowerShell and .reg files", QLineEdit(),
+                              hint="Run as SYSTEM during setup, after the tweaks, before any user exists. "
+                                   "HKEY_CURRENT_USER in a .reg file goes to every new user.")
+        self.f_custom.input.hide()
+        self.f_custom.row.addWidget(button("Add file…", self._add_custom))
+        sec.body.addWidget(self.f_custom)
+        self.custom_list = QWidget()
+        self.custom_box = vbox(self.custom_list, 4)
+        sec.body.addWidget(self.custom_list)
+        self._fill_custom()
+        return sec
+
+    def _add_custom(self):
+        pattern = "Scripts (" + " ".join("*" + e for e in CUSTOM_EXT) + ")"
+        files, _ = QFileDialog.getOpenFileNames(self, "Add scripts", "", pattern)
+        have = list(self.win.s["custom"])
+        self._set("custom", have + [str(f) for f in files if str(f) not in have])
+        self._fill_custom()
+
+    def _remove_custom(self, path):
+        self._set("custom", [f for f in self.win.s["custom"] if f != path])
+        self._fill_custom()
+
+    def _fill_custom(self):
+        self._clear(self.custom_box)
+        for path in self.win.s["custom"]:
+            row = QWidget()
+            lay = hbox(row, 8)
+            lay.addWidget(label(path, wrap=True), 1)
+            lay.addWidget(button("Remove", lambda _=False, f=path: self._remove_custom(f), "ghost"))
+            self.custom_box.addWidget(row)
 
     # ---------- apps ----------
     def _apps_section(self):
@@ -281,6 +335,27 @@ class SetupPage(Page):
         c.currentIndexChanged.connect(lambda _: self._set(key, c.currentData()))
         return c
 
+    def set_editions(self, editions):
+        """Limit the edition list to what the ISO holds (None: the ISO is unknown, offer every edition).
+        The chosen edition stays listed even when missing, so validate() can point at it."""
+        self.editions = editions
+        cur = self.win.s["edition"]
+        names = list(GENERIC_KEYS) if not editions else list(editions)
+        if cur and cur not in names:
+            names.append(cur)
+        if [self.edition.itemText(i) for i in range(1, self.edition.count())] == names:
+            self.refresh()
+            return
+        self.loading = True
+        try:
+            self.edition.clear()
+            for n in [ASK] + names:
+                self.edition.addItem(n)
+            self.edition.setCurrentText(cur or ASK)
+        finally:
+            self.loading = False
+        self.refresh()
+
     def load(self):
         """Show the values in win.s (after a profile was applied)."""
         s = self.win.s
@@ -306,6 +381,8 @@ class SetupPage(Page):
             self.wsec.setCurrentIndex(max(0, self.wsec.findData(s["wifi_security"])))
             self.whidden.setChecked(s["wifi_hidden"])
             self._fill_chosen()
+            self.f_drivers.input.setText(s["drivers"])
+            self._fill_custom()
         finally:
             self.loading = False
         self.refresh()
@@ -329,7 +406,16 @@ class SetupPage(Page):
             err = "Enter the Wi-Fi network name." if not v["wifi_ssid"].strip() else                 wifi_error(v["wifi_ssid"], v["wifi_password"], v["wifi_security"])
         if err and not problem:
             problem = (err, self.f_wpass if "password" in err else self.f_ssid)
-        for f in (self.f_user, self.f_comp, self.f_lang, self.f_kbd, self.f_install, self.f_ssid, self.f_wpass):
+        if not problem:
+            err = drivers_error(v)
+            problem = (err, self.f_drivers) if err else None
+        if not problem:
+            err = custom_error(v)
+            problem = (err, self.f_custom) if err else None
+        if not problem and v["unattended"] and v["edition"] and self.editions and v["edition"] not in self.editions:
+            problem = (f"This ISO has no Windows 11 {v['edition']}. It has: {', '.join(self.editions)}.", self.f_edition)
+        for f in (self.f_user, self.f_comp, self.f_lang, self.f_kbd, self.f_install, self.f_ssid, self.f_wpass,
+                  self.f_drivers, self.f_custom, self.f_edition):
             f.set_error(problem[0] if problem and problem[1] is f else None)
         return problem
 

@@ -137,6 +137,30 @@ function applyImage(image, edition) {
     if (rc) throw new Error('dism failed (' + rc + '): ' + why.replace('{edition}', '"' + edition + '"'));
 }
 
+// .inf files under a folder (recursive).
+function findInfs(folder, found) {
+    found = found || [];
+    if (!fso.FolderExists(folder)) return found;
+    for (var e = new Enumerator(fso.GetFolder(folder).Files); !e.atEnd(); e.moveNext()) {
+        if (/\.inf$/i.test(e.item().Name)) found.push(e.item().Path);
+    }
+    for (var d = new Enumerator(fso.GetFolder(folder).SubFolders); !d.atEnd(); d.moveNext()) findInfs(d.item().Path, found);
+    return found;
+}
+
+// Drivers from the "Drivers" folder on the media, so Setup sees disks that need them (Intel RST/VMD). Never fatal.
+function loadDrivers(media) {
+    var infs = findInfs(media + '\\$WinpeDriver$');
+    for (var i = 0; i < infs.length; i++) run('drvload "' + infs[i] + '"');
+    return infs.length;
+}
+
+// The same drivers inside the installed Windows. Never fatal.
+function addDrivers(media) {
+    var dir = media + '\\$WinpeDriver$';
+    if (fso.FolderExists(dir)) run('dism /Image:' + WIN + '\\ /Add-Driver /Driver:"' + dir + '" /Recurse');
+}
+
 function makeBootable() { mustRun('bcdboot ' + WIN + '\\Windows /s ' + EFI + ' /f UEFI', 'bcdboot'); }
 
 // Setup normally carries these over itself; here we skipped it, so copy the answer file and $OEM$ files.
@@ -158,6 +182,7 @@ function main() {
     var media = WScript.ScriptFullName.substr(0, 2);   // e.g. "D:"
     if (!isUefi()) { say('Legacy BIOS: automatic install skipped, choose the disk in setup.', 30); return; }
 
+    loadDrivers(media);
     var skip = mediaDisks(media), disks = readDisks(), disk = pickDisk(disks, skip);
     if (!disk) {
         var seen = [];
@@ -170,6 +195,7 @@ function main() {
     log('Installing to ' + describe(disk));
     partition(disk);
     applyImage(findImage(media), edition);
+    addDrivers(media);
     makeBootable();
     copyAnswers(media);
     reboot();

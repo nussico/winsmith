@@ -2,6 +2,7 @@
 import base64
 import fnmatch
 import re
+from pathlib import Path
 from xml.sax.saxutils import escape
 
 from .patches import PATCHES, PROTECTED_APPS
@@ -29,7 +30,10 @@ DEFAULTS = {
     "auto_install": "off",  # off | best_ssd | disk0: install without asking which disk (wipes it)
     "wifi": False, "wifi_ssid": "", "wifi_password": "", "wifi_security": "WPA2", "wifi_hidden": False,
     "apps": [],  # winget package IDs, installed after the first sign-in
+    "drivers": "",  # folder with .inf drivers, copied to $WinpeDriver$ on the ISO
+    "custom": [],  # .ps1 / .reg files that run during setup after the tweaks
 }
+CUSTOM_EXT = (".ps1", ".reg")
 AUTO_INSTALL = ("off", "best_ssd", "disk0")
 AUTO_SCRIPT = "autoinstall.js"
 
@@ -111,6 +115,58 @@ def wifi_on(cfg):
             and wifi_error(u["wifi_ssid"], u["wifi_password"], u["wifi_security"]) is None)
 
 
+def custom_files(cfg):
+    """The user's own scripts that exist and have an allowed extension, no duplicates, in the order given."""
+    seen = []
+    for f in {**DEFAULTS, **cfg}["custom"]:
+        if isinstance(f, str) and f.lower().endswith(CUSTOM_EXT) and Path(f).is_file() and f not in seen:
+            seen.append(f)
+    return seen
+
+
+def custom_error(cfg):
+    """Returns a problem with the custom scripts or the driver folder, or None."""
+    u = {**DEFAULTS, **cfg}
+    for f in u["custom"]:
+        if not isinstance(f, str) or not f.lower().endswith(CUSTOM_EXT):
+            return f"Only .ps1 and .reg files can run: {Path(str(f)).name}"
+        if not Path(f).is_file():
+            return f"Script not found: {f}"
+    return None
+
+
+def drivers_error(cfg):
+    folder = {**DEFAULTS, **cfg}["drivers"].strip()
+    if not folder:
+        return None
+    if not Path(folder).is_dir():
+        return "Driver folder not found."
+    if not any(Path(folder).rglob("*.inf")):
+        return "No .inf driver files in that folder."
+    return None
+
+
+def remap_reg(data):
+    """A .reg file as bytes -> UTF-16 bytes whose HKEY_CURRENT_USER keys point at the default profile (every new user)."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        text = data.decode("utf-16")
+    else:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("cp1252", errors="replace")
+    text = re.sub(r"\[(-?)(?:HKEY_CURRENT_USER|HKCU)\\", lambda m: f"[{m.group(1)}HKEY_USERS\\WS_DEFAULT\\", text,
+                  flags=re.IGNORECASE)
+    return b"\xff\xfe" + text.encode("utf-16-le")
+
+
+def custom_name(i, path):
+    """File name on the ISO: numbered, ASCII-safe, original extension."""
+    p = Path(path)
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", p.stem)[:40] or "script"
+    return f"custom-{i}-{stem}{p.suffix.lower()}"
+
+
 def auto_mode(cfg):
     """The automatic-install mode that really applies ("off" unless setup answers are on)."""
     u = {**DEFAULTS, **cfg}
@@ -144,8 +200,8 @@ def encode_password(pw, suffix="Password"):
     return base64.b64encode((pw + suffix).encode("utf-16-le")).decode()
 
 
-def _comp(name, body):
-    return (f'<component name="{name}" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" '
+def _comp(name, body, arch="amd64"):
+    return (f'<component name="{name}" processorArchitecture="{arch}" publicKeyToken="31bf3856ad364e35" '
             f'language="neutral" versionScope="nonSxS">{body}</component>')
 
 
@@ -155,9 +211,12 @@ def _commands(tag, field, cmds):
     return items
 
 
-def make_unattend(cfg, patch_ids):
+def make_unattend(cfg, patch_ids, arch="amd64"):
     u = {**DEFAULTS, **cfg}
     wifi = wifi_on(u)  # judged before stripping, exactly as iso.build does
+    custom = bool(custom_files(u))
+    def comp(name, body):  # every component names the ISO's architecture
+        return _comp(name, body, arch)
     u = {k: v.strip() if isinstance(v, str) else v for k, v in u.items()}
     on = u["unattended"]
     lang = escape(u["language"])
@@ -189,15 +248,15 @@ def make_unattend(cfg, patch_ids):
         pe += "<RunSynchronous>" + _commands("RunSynchronousCommand", "Path", pe_cmds) + "</RunSynchronous>"
 
     # specialize: runs as SYSTEM before any user exists, so DEFAULT-profile tweaks reach every user.
-    spec = _comp("Microsoft-Windows-Shell-Setup", f"<ComputerName>{escape(u['computer']) or '*'}</ComputerName>") if on else ""
+    spec = comp("Microsoft-Windows-Shell-Setup", f"<ComputerName>{escape(u['computer']) or '*'}</ComputerName>") if on else ""
     ps = f"powershell.exe -NoProfile -ExecutionPolicy Bypass -File {SCRIPTS_DIR}"
     spec_cmds = []
-    if patch_ids:
+    if patch_ids or custom:
         spec_cmds.append(rf"{ps}\{SCRIPT_NAME}")
     if wifi:  # the network is up before the first sign-in, so apps and updates can use it
         spec_cmds.append(rf"{ps}\{WIFI_SCRIPT}")
     if spec_cmds:
-        spec += _comp("Microsoft-Windows-Deployment",
+        spec += comp("Microsoft-Windows-Deployment",
                       "<RunSynchronous>" + _commands("RunSynchronousCommand", "Path", spec_cmds) + "</RunSynchronous>")
 
     # oobeSystem
@@ -228,14 +287,14 @@ def make_unattend(cfg, patch_ids):
     if logon:
         shell += "<FirstLogonCommands>" + _commands("SynchronousCommand", "CommandLine", logon) + "</FirstLogonCommands>"
 
-    pe_intl = _comp("Microsoft-Windows-International-Core-WinPE",
+    pe_intl = comp("Microsoft-Windows-International-Core-WinPE",
                     f"<SetupUILanguage><UILanguage>{lang}</UILanguage></SetupUILanguage>{intl}") if on else ""
-    oobe_intl = _comp("Microsoft-Windows-International-Core", intl) if on else ""
+    oobe_intl = comp("Microsoft-Windows-International-Core", intl) if on else ""
     return ('<?xml version="1.0" encoding="utf-8"?>\n'
             '<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">\n'
-            f'<settings pass="windowsPE">{pe_intl}{_comp("Microsoft-Windows-Setup", pe) if pe else ""}</settings>\n'
+            f'<settings pass="windowsPE">{pe_intl}{comp("Microsoft-Windows-Setup", pe) if pe else ""}</settings>\n'
             f'<settings pass="specialize">{spec}</settings>\n'
-            f'<settings pass="oobeSystem">{oobe_intl}{_comp("Microsoft-Windows-Shell-Setup", shell) if shell else ""}</settings>\n'
+            f'<settings pass="oobeSystem">{oobe_intl}{comp("Microsoft-Windows-Shell-Setup", shell) if shell else ""}</settings>\n'
             "</unattend>\n")
 
 
@@ -263,8 +322,9 @@ def _reg_cmd(entry, user="HKU\\WS_DEFAULT"):
     return f"Reg add {ps_quote(key)} /v {ps_quote(name)} /t REG_DWORD /d {hex(int(value))} /f"
 
 
-def make_patch_script(patch_ids):
-    """PowerShell run as SYSTEM in the specialize pass. A failed patch only logs: Setup must never stop."""
+def make_patch_script(patch_ids, custom=()):
+    """PowerShell run as SYSTEM in the specialize pass. A failed patch only logs: Setup must never stop.
+    `custom` are the names (see custom_name) of the user's own .ps1/.reg files next to this script."""
     lines = [
         "$ErrorActionPreference = 'Continue'",
         "$ProgressPreference = 'SilentlyContinue'",
@@ -307,6 +367,21 @@ def make_patch_script(patch_ids):
                          rf"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File {SCRIPTS_DIR}\{USER_SCRIPT}"),
             "}",
         ]
+    for name in custom:  # the default hive is still loaded, so a .reg file's HKEY_CURRENT_USER (remapped) reaches every user
+        path = rf"{SCRIPTS_DIR}\{name}"
+        if name.endswith(".reg"):
+            lines += [f"Run {ps_quote('custom ' + name)} {{", f"    Reg import {ps_quote(path)}", "}"]
+            # Reg (the helper above) logs a non-zero exit code, so a failed import shows in winsmith.log
+        else:
+            lines += [
+                f"Run {ps_quote('custom ' + name)} {{",
+                f"    $p = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', "
+                f"'-ExecutionPolicy', 'Bypass', '-File', {ps_quote(path)} -RedirectStandardOutput "
+                f"'{SCRIPTS_DIR}\\winsmith-{name}.log' -RedirectStandardError '{SCRIPTS_DIR}\\winsmith-{name}.err'",
+                "    if (-not $p.WaitForExit(600000)) { $p.Kill(); Log '  timed out after 10 minutes, stopped' }",
+                "    elseif ($p.ExitCode) { Log \"  exit code $($p.ExitCode)\" }",
+                "}",
+            ]
     lines += [
         "[gc]::Collect()",
         r"reg.exe unload HKU\WS_DEFAULT | Out-Null",

@@ -60,6 +60,14 @@ and shows the error if it fails. oscdimg is also found in x86 and ARM64 ADK inst
   The PC needs internet then; progress is in `C:\Windows\Setup\Scripts\winsmith-apps.log`. Searching needs winget
   on the PC running Winsmith, otherwise type the ID.
 - **Wi-Fi**: the PC joins your network on its own (WPA2, WPA3 or open, hidden networks too). Switch it on in Setup and enter the name.
+- **Drivers**: pick a folder with `.inf` drivers (for example Intel RST/VMD, so Setup can see the disk). They are
+  loaded during Setup and installed into Windows, also with the Best SSD install.
+- **Your own scripts**: add `.ps1` or `.reg` files. They run as SYSTEM during setup after the tweaks, before any user
+  exists; `HKEY_CURRENT_USER` in a `.reg` file goes to every new user. Output of each `.ps1`: `C:\Windows\Setup\Scripts\winsmith-custom-*.log`.
+- **Editions**: on Windows the ISO's editions are read when you pick it and the Edition list shows only those.
+  On every OS a build stops early if the chosen edition is not in the ISO.
+- **ARM64**: ARM64 ISOs are detected and get a matching answer file (UEFI boot only).
+- **Free space**: a build needs about twice the ISO size plus 1 GB free next to the new ISO; Winsmith checks first.
 - **ISO name**: the file name and the disc label carry the date and Winsmith version, e.g. `Winsmith_Win11_v0.2.5_2026-10-19.iso`.
 - **Profiles**: save your patches and Setup answers as a profile, export it as `.json` and import it on another PC.
   Passwords are left out unless you answer Yes when asked.
@@ -91,8 +99,18 @@ Not yet: downloading Windows.
 - Profiles keep passwords only if you say Yes, and then in plain text. Share exported profiles with care.
 - Winsmith's own settings (`config.json`) hold only the ISO path and the time of the last update check, never passwords.
 - Anyone with the ISO can read these, so keep it private.
-- `Winsmith.exe` is not code-signed, so Windows Defender may warn about it (for example `Bearfoos.A!ml`). That is a
-  false positive of its heuristics; you can check the file against the release page or run from source instead.
+- Releases are built on GitHub Actions and signed through SignPath (see below). Older or locally built exes are
+  unsigned, and Windows Defender may warn about them (for example `Bearfoos.A!ml`), a false positive of its
+  heuristics. SmartScreen can still warn about a new signed release until it builds up reputation.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+- Release exes are built from this repository by GitHub Actions (`.github/workflows/release.yml`) and signed after manual approval.
+- Committer and approver: [nussico](https://github.com/nussico).
+- Privacy: Winsmith only contacts api.github.com and github.com, for the daily update check and the update download.
+  It sends no data about you or your PC.
 
 ## Check an installed PC
 

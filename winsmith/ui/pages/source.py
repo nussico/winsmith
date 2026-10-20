@@ -1,7 +1,9 @@
 """Step 1: pick the Windows ISO."""
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+import threading
+
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import QFileDialog, QFrame, QLineEdit
 
 from ... import iso
@@ -11,10 +13,19 @@ from ..widgets import DiscIcon, DropZone, Field, button, hbox, label, vbox
 DOWNLOAD_URL = "https://www.microsoft.com/software-download/windows11"
 
 
+class InfoSignals(QObject):
+    """Reading the ISO runs in a thread; this hands the answer to the UI thread."""
+    done = Signal(str, object, object)  # ISO path, architecture, image names
+
+
 class SourcePage(Page):
     def __init__(self, win):
         super().__init__("Choose a Windows 11 ISO", "Winsmith reads it and writes a new one. Your file is never changed.")
         self.win = win
+        self.info = {}  # ISO path -> (arch, image names) once read
+        self.reading = None
+        self.sig = InfoSignals()
+        self.sig.done.connect(self._got_info)
 
         self.drop = DropZone("Drop a Windows 11 ISO here", "or click to browse")
         self.drop.clicked.connect(self.browse)
@@ -73,6 +84,31 @@ class SourcePage(Page):
         if p:
             self.set_path(p)
 
+    def _info_text(self, raw):
+        arch, names = self.info.get(raw, (None, None))
+        if arch is None:
+            return ""
+        eds = iso.editions_in(names or [])
+        return f"\n{'ARM64' if arch == 'arm64' else 'x64'}" + (f"  ·  {', '.join(eds)}" if eds else "")
+
+    def _read_info(self, raw):
+        """Which editions and architecture the ISO holds (Windows only). Read once per file, in a thread."""
+        if raw in self.info:
+            self.win.pages["Setup"].set_editions(iso.editions_in(self.info[raw][1] or []) or None)
+            return
+        self.win.pages["Setup"].set_editions(None)  # until this ISO has been read
+        if self.reading == raw or not iso.IS_WINDOWS:
+            return
+        self.reading = raw
+        threading.Thread(target=lambda: self.sig.done.emit(raw, *iso.read_info(raw)), daemon=True).start()
+
+    def _got_info(self, raw, arch, names):
+        if self.reading == raw:
+            self.reading = None
+        self.info[raw] = (arch, names)
+        if raw == self.win.s["iso"]:
+            self.refresh()
+
     def ok(self):
         raw = self.win.s["iso"]
         return bool(raw) and Path(raw).is_file()
@@ -85,7 +121,10 @@ class SourcePage(Page):
         if ok:
             p = Path(raw)
             self.file_name.setText(p.name)
-            self.file_meta.setText(f"{p.stat().st_size / 2**30:.1f} GB  ·  {p.parent}")
+            self.file_meta.setText(f"{p.stat().st_size / 2**30:.1f} GB  ·  {p.parent}" + self._info_text(raw))
+            self._read_info(raw)
+        else:
+            self.win.pages["Setup"].set_editions(None)
         self.download.setVisible(not raw)
         self.field.set_error("File not found." if raw and not ok else None)
         self.win.update_steps()

@@ -10,13 +10,13 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QGraphicsOpacityEffect
                                QPlainTextEdit, QWidget)
 
 from ... import iso
-from ...unattend import auto_mode
+from ...unattend import auto_mode, custom_files
 from ..page import Page
 from ..theme import T
 from ..widgets import Field, ProgressBar, Section, animation, button, hbox, label, set_prop, vbox
 
 SUMMARY = [("Windows ISO", "Source"), ("Tweaks", "Patches"), ("User", "Setup"), ("Edition", "Setup"),
-           ("Language", "Setup")]
+           ("Language", "Setup"), ("Drivers", "Setup"), ("Scripts", "Setup")]
 
 
 class BuildSignals(QObject):
@@ -110,6 +110,9 @@ class BuildPage(Page):
         self.open_btn = button("Show in folder", self._open_folder)
         self.open_btn.hide()
         self.add_right(self.open_btn)
+        self.cancel_btn = button("Cancel", self._cancel, "ghost")
+        self.cancel_btn.hide()
+        self.add_right(self.cancel_btn)
         self.build_btn = button("Build ISO", self.build, "primary", big=True)
         self.add_right(self.build_btn)
 
@@ -129,6 +132,8 @@ class BuildPage(Page):
         self.summary["User"].setText(on and s["user"].strip() or ask)
         self.summary["Edition"].setText(on and s["edition"] or ask)
         self.summary["Language"].setText(f"{s['language']}, keyboard {s['keyboard']}, {s['timezone']}" if on else ask)
+        self.summary["Drivers"].setText(s["drivers"].strip() or "None")
+        self.summary["Scripts"].setText(f"{len(custom_files(s))} of your own" if custom_files(s) else "None")
         self._refresh_tools()
 
     def _refresh_tools(self):
@@ -258,6 +263,9 @@ class BuildPage(Page):
         self.building = True
         self.build_btn.setEnabled(False)
         self.build_btn.setText("Building…")
+        self.cancel_btn.setText("Cancel")
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.show()
         self.open_btn.hide()
         self.log_box.clear()
         self.pbar.set(0, 0)
@@ -271,6 +279,12 @@ class BuildPage(Page):
         self.job = threading.Thread(target=self._thread, args=args, daemon=True)
         self.job.start()
         self.ticker.start()
+
+    def _cancel(self):
+        if self.building and self.cancel is not None:
+            self.cancel.set()
+            self.cancel_btn.setText("Cancelling…")
+            self.cancel_btn.setEnabled(False)
 
     def confirm_wipe(self):
         mode = auto_mode(self.win.s)
@@ -312,7 +326,13 @@ class BuildPage(Page):
         self.pbar.shimmer(False)
         self.build_btn.setEnabled(not iso.missing_tools())
         self.build_btn.setText("Build ISO")
-        if err:
+        self.cancel_btn.hide()
+        if err and self.cancel is not None and self.cancel.is_set():
+            self._log("Build cancelled.")
+            self.pbar.set(0, 200)
+            self.pbar.set_color("accent")
+            self._set_status("Build cancelled", "Nothing was kept. Press Build ISO to start again.")
+        elif err:
             self._log(f"ERROR: {err}", "danger")
             self.pbar.set_color("danger")
             self._set_status("Build failed", err, "danger")
